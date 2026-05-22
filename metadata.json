@@ -1,0 +1,6 @@
+{
+  "name": "URL UNO",
+  "description": "An elegant, web-themed UNO card game based on web protocols and URLs, featuring interactive bots, custom URL deck generation, and standard UNO rules.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
