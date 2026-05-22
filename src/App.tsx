@@ -194,8 +194,10 @@ export default function App() {
   const [isMultiplayer, setIsMultiplayer] = useState<boolean>(false);
   const [myIndex, setMyIndex] = useState<number>(-1);
   const [isRoomDialogOpen, setIsRoomDialogOpen] = useState<boolean>(false);
-  const [userName, setUserName] = useState<string>('Vaibhav Patil');
+  const [userName, setUserName] = useState<string>('');
   const [userAvatar, setUserAvatar] = useState<string>('💻');
+  const [isNamePromptOpen, setIsNamePromptOpen] = useState<boolean>(false);
+  const [tempAvatar, setTempAvatar] = useState<string>('💻');
 
   const handleSetUserName = (name: string) => {
     setUserName(name);
@@ -205,6 +207,82 @@ export default function App() {
   const handleSetUserAvatar = (avatar: string) => {
     setUserAvatar(avatar);
     localStorage.setItem('url_uno_player_avatar', avatar);
+  };
+
+  const handleNamePromptSubmit = async (enteredName: string, enteredAvatar: string) => {
+    localStorage.setItem('url_uno_player_name', enteredName);
+    localStorage.setItem('url_uno_player_avatar', enteredAvatar);
+    setUserName(enteredName);
+    setUserAvatar(enteredAvatar);
+    setIsNamePromptOpen(false);
+    
+    // Refresh offline player list instantly with the new name and avatar
+    updatePlayers((prev) => 
+      prev.map((p) => p.id === 'human' ? { ...p, name: enteredName, avatar: enteredAvatar } : p)
+    );
+
+    // If there was a pending room to join, auto join it now!
+    const pendingRoomId = (window as any).pendingRoomIdToJoin;
+    if (pendingRoomId) {
+      delete (window as any).pendingRoomIdToJoin;
+      try {
+        const roomRef = doc(db, 'rooms', pendingRoomId);
+        const docSnapshot = await getDoc(roomRef);
+        if (docSnapshot.exists()) {
+          const data = docSnapshot.data();
+          const activePlayers = data.players || [];
+          const existingIdx = activePlayers.findIndex((p: any) => p.id === myPlayerId);
+          if (existingIdx !== -1) {
+            setRoomId(pendingRoomId);
+            setIsMultiplayer(true);
+            setMyIndex(existingIdx);
+            myIndexRef.current = existingIdx;
+            localStorage.setItem('url_uno_active_room_id', pendingRoomId);
+            const nextUrl = window.location.pathname + `?room=${pendingRoomId}`;
+            window.history.replaceState(null, '', nextUrl);
+            addLog('success', `[SYSTEM] Reconnected to active Room ${pendingRoomId} successfully.`);
+          } else if (data.status === 'setup' && activePlayers.length < 10) {
+            const guestPlayer: Player = {
+              id: myPlayerId,
+              name: enteredName,
+              isBot: false,
+              cards: [],
+              avatar: enteredAvatar,
+              statusMsg: 'Connected Guest...',
+              analytics: { cardsPlayed: 0, cardsDrawn: 0, skipsReceived: 0 },
+            };
+            const nextPlayers = [...activePlayers, guestPlayer];
+            const assignedIndex = nextPlayers.length - 1;
+
+            const updatedLogs = [
+              ...(data.logs || []),
+              {
+                id: `log-${Math.random().toString(36).substring(2, 9)}`,
+                timestamp: new Date().toLocaleTimeString(),
+                type: 'info',
+                message: `[JOIN] Player ${enteredName} auto-reconnected on seat ${assignedIndex}.`
+              }
+            ];
+
+            await updateDoc(roomRef, {
+              players: nextPlayers,
+              logs: updatedLogs,
+              updatedAt: new Date().toISOString()
+            });
+
+            setRoomId(pendingRoomId);
+            setIsMultiplayer(true);
+            setMyIndex(assignedIndex);
+            myIndexRef.current = assignedIndex;
+            localStorage.setItem('url_uno_active_room_id', pendingRoomId);
+            const nextUrl = window.location.pathname + `?room=${pendingRoomId}`;
+            window.history.replaceState(null, '', nextUrl);
+          }
+        }
+      } catch (err) {
+        console.error("Delayed joining failed", err);
+      }
+    }
   };
 
   // Synchronize resize listeners, load persistent state, and probe Firebase connection
@@ -225,12 +303,14 @@ export default function App() {
       setMyPlayerId(currentId);
 
       const savedName = localStorage.getItem('url_uno_player_name');
-      const finalName = savedName || userName;
-      if (savedName) setUserName(savedName);
-
-      const savedAvatar = localStorage.getItem('url_uno_player_avatar');
-      const finalAvatar = savedAvatar || userAvatar;
-      if (savedAvatar) setUserAvatar(savedAvatar);
+      const savedAvatar = localStorage.getItem('url_uno_player_avatar') || '💻';
+      
+      if (savedName) {
+        setUserName(savedName);
+        setUserAvatar(savedAvatar);
+      } else {
+        setIsNamePromptOpen(true);
+      }
 
       // Restore Room on Reload & sync from URL query
       const restoreRoomSync = async (playerId: string, name: string, avatar: string) => {
@@ -311,7 +391,17 @@ export default function App() {
         }
       };
 
-      restoreRoomSync(currentId, finalName, finalAvatar);
+      if (savedName) {
+        restoreRoomSync(currentId, savedName, savedAvatar);
+      } else {
+        const params = new URLSearchParams(window.location.search);
+        const roomParam = params.get('room');
+        const savedRoomId = localStorage.getItem('url_uno_active_room_id');
+        const targetRoomId = (roomParam || savedRoomId || '').trim().toUpperCase();
+        if (targetRoomId) {
+          (window as any).pendingRoomIdToJoin = targetRoomId;
+        }
+      }
 
       return () => {
         window.removeEventListener('resize', handleResize);
@@ -810,10 +900,10 @@ export default function App() {
     // Initialize players
     const humanPlayer: Player = {
       id: 'human',
-      name: 'Vaibhav Patil',
+      name: localStorage.getItem('url_uno_player_name') || userName || 'Guest Client',
       isBot: false,
       cards: [],
-      avatar: '💻',
+      avatar: localStorage.getItem('url_uno_player_avatar') || userAvatar || '💻',
       statusMsg: 'Awaiting connection...',
       analytics: { cardsPlayed: 0, cardsDrawn: 0, skipsReceived: 0 },
     };
@@ -1154,23 +1244,23 @@ export default function App() {
     // Subtract card from hand
     const nextHand = activePlayer.cards.filter((c) => c.id !== cardId);
     
+    const updatedPlayers = playersRef.current.map((p, idx) => {
+      if (idx === playerIndex) {
+        return {
+          ...p,
+          cards: nextHand,
+          statusMsg: `Routed ${cardToPlay.type === 'number' ? 'value ' + cardToPlay.value : cardToPlay.type.toUpperCase()}`,
+          analytics: {
+            ...p.analytics,
+            cardsPlayed: p.analytics.cardsPlayed + 1,
+          },
+        };
+      }
+      return p;
+    });
+
     // Write analytics update
-    updatePlayers((prev) =>
-      prev.map((p, idx) => {
-        if (idx === playerIndex) {
-          return {
-            ...p,
-            cards: nextHand,
-            statusMsg: `Routed ${cardToPlay.type === 'number' ? 'value ' + cardToPlay.value : cardToPlay.type.toUpperCase()}`,
-            analytics: {
-              ...p.analytics,
-              cardsPlayed: p.analytics.cardsPlayed + 1,
-            },
-          };
-        }
-        return p;
-      })
-    );
+    updatePlayers(updatedPlayers);
 
     playSound('play');
 
@@ -1388,14 +1478,13 @@ export default function App() {
 
     // Bot matches turn - compute delay move
     setIsBotThinking(true);
-    updatePlayers((prev) =>
-      prev.map((p, idx) => {
-        if (idx === currentPlayerIndex) {
-          return { ...p, statusMsg: 'Compiling target headers...' };
-        }
-        return p;
-      })
-    );
+    const updatedPlayersMsg = playersRef.current.map((p, idx) => {
+      if (idx === currentPlayerIndex) {
+        return { ...p, statusMsg: 'Compiling target headers...' };
+      }
+      return p;
+    });
+    updatePlayers(updatedPlayersMsg);
 
     botTimerRef.current = setTimeout(() => {
       executeBotMove();
@@ -1442,16 +1531,23 @@ export default function App() {
       } else {
         // Pass to next server
         addLog('info', `[PASS] Server ${botPlayer.name} passed loop turn.`);
-        updatePlayers((prev) =>
-          prev.map((p, idx) => {
-            if (idx === botIndex) {
-              return { ...p, statusMsg: 'Awaiting port signal...' };
-            }
-            return p;
-          })
-        );
+        const updatedPlayersPass = playersRef.current.map((p, idx) => {
+          if (idx === botIndex) {
+            return { ...p, statusMsg: 'Awaiting port signal...' };
+          }
+          return p;
+        });
+        updatePlayers(updatedPlayersPass);
         const nextIndex = getNextTurnIndex(gameDirectionRef.current, botIndex, playersRef.current.length);
         updateCurrentPlayerIndex(nextIndex);
+
+        if (isMultiplayerRef.current) {
+          writeRoomSync({
+            players: updatedPlayersPass,
+            currentPlayerIndex: nextIndex,
+            logs: [...logs, { id: `log-${Math.random().toString(36).substring(2, 9)}`, timestamp: new Date().toLocaleTimeString(), type: 'info', message: `Server ${botPlayer.name} passed loop turn.` }]
+          });
+        }
       }
     }
     
@@ -2248,6 +2344,82 @@ export default function App() {
                 {txt}
               </button>
             ))}
+          </div>
+        )}
+
+        {/* INITIAL IDENTITY DISCOVERY PROMPT */}
+        {isNamePromptOpen && (
+          <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md z-50 flex items-center justify-center p-4 animate-fade-in pointer-events-auto">
+            <div className="bg-slate-900 border-2 border-slate-800 rounded-3xl p-6 sm:p-8 w-full max-w-sm shadow-2xl relative overflow-hidden">
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 via-purple-500 to-indigo-500" />
+              
+              <div className="text-center space-y-2 mb-6">
+                <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center mx-auto mb-3">
+                  <Network className="w-6 h-6 text-indigo-400 animate-pulse" />
+                </div>
+                <h3 className="text-sm font-sans font-black text-slate-100 uppercase tracking-wider">
+                  INITIALIZE OPERATOR IDENTITY
+                </h3>
+                <p className="text-[10px] font-mono text-slate-400">
+                  Authentication is required to route packets and sync dynamic connections.
+                </p>
+              </div>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const formData = new FormData(e.currentTarget);
+                  const nameVal = (formData.get('operatorCodeName') as string || '').trim();
+                  if (!nameVal) return;
+                  handleNamePromptSubmit(nameVal, tempAvatar);
+                }}
+                className="space-y-5"
+              >
+                <div className="space-y-1.5">
+                  <label className="text-[9.5px] font-mono font-bold text-slate-400 block uppercase tracking-wider">
+                    Operator Code Name
+                  </label>
+                  <input
+                    name="operatorCodeName"
+                    type="text"
+                    required
+                    placeholder="e.g. Master_Packeteer, Root_Null"
+                    maxLength={15}
+                    autoFocus
+                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-800 text-slate-200 rounded-xl text-xs font-sans focus:outline-none focus:border-indigo-500/80 focus:ring-1 focus:ring-indigo-500/30 transition-all placeholder:text-slate-600 font-bold"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[9.5px] font-mono font-bold text-slate-400 block uppercase tracking-wider">
+                    Routing Node Icon (Avatar)
+                  </label>
+                  <div className="grid grid-cols-5 gap-2 bg-slate-950/50 p-2 rounded-xl border border-slate-905">
+                    {['💻', '🛡️', '⚙️', '🚀', '📡', '🌐', '🛸', '👾', '🕵️', '🔒'].map((avatar) => (
+                      <button
+                        key={avatar}
+                        type="button"
+                        onClick={() => setTempAvatar(avatar)}
+                        className={`w-8 h-8 flex items-center justify-center rounded-lg text-lg transition-all cursor-pointer ${
+                          tempAvatar === avatar
+                            ? 'bg-indigo-500/20 border border-indigo-500/50 text-white scale-105'
+                            : 'bg-slate-950 border border-slate-850 text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                        }`}
+                      >
+                        {avatar}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] text-white font-mono font-bold text-[10px] uppercase tracking-widest rounded-xl transition-all shadow-lg hover:shadow-indigo-500/20 cursor-pointer"
+                >
+                  ESTABLISH PORT CONNECTION
+                </button>
+              </form>
+            </div>
           </div>
         )}
 
