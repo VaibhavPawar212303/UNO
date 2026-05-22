@@ -35,6 +35,12 @@ import { GameSettingsComponent } from './components/GameSettingsComponent';
 import { GameLogsComponent } from './components/GameLogsComponent';
 import { ColorChooserDialog } from './components/ColorChooserDialog';
 
+// Firebase Integrations
+import { db, handleFirestoreError, OperationType } from './lib/firebase';
+import { doc, setDoc, updateDoc, getDoc, getDocFromServer, onSnapshot } from 'firebase/firestore';
+import { PrivateRoomDialog } from './components/PrivateRoomDialog';
+import { Network } from 'lucide-react';
+
 // Sound synthesis helper using standard browser procedural Audio Web API
 const synthSound = (type: 'play' | 'draw' | 'uno' | 'warn' | 'success' | 'alert') => {
   try {
@@ -110,6 +116,12 @@ const BOT_IDENTITIES = [
   { name: 'Rushikesh', avatar: '👦', description: 'Left server gateway - high-speed routing node.' },
   { name: 'jaydeep joshi', avatar: '🟢', description: 'Top packet proxy - stable protocol responder.' },
   { name: 'guest055985', avatar: '🖥️', description: 'Right socket server - secure transaction pool.' },
+  { name: 'LoadBalancer', avatar: '🎛️', description: 'Traffic orchestrator - load distributing node.' },
+  { name: 'NginxEdge', avatar: '⚙️', description: 'Edge proxy - raw static throughput.' },
+  { name: 'RedisNode', avatar: '🟥', description: 'In-memory socket state - rapid key value.' },
+  { name: 'CloudRun', avatar: '☁️', description: 'Serverless container - ephemeral compute.' },
+  { name: 'SpannerDB', avatar: '🧱', description: 'Spanning database - horizontal shard leader.' },
+  { name: 'WebRTCPeer', avatar: '📡', description: 'Real-time media tunnel - P2P stream.' },
 ];
 
 export default function App() {
@@ -149,6 +161,16 @@ export default function App() {
   const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
   const [windowWidth, setWindowWidth] = useState<number>(1024);
 
+  // Online Private Room & Lobby States
+  const [myPlayerId, setMyPlayerId] = useState<string>('');
+  const [roomId, setRoomId] = useState<string>('');
+  const [isMultiplayer, setIsMultiplayer] = useState<boolean>(false);
+  const [myIndex, setMyIndex] = useState<number>(-1);
+  const [isRoomDialogOpen, setIsRoomDialogOpen] = useState<boolean>(false);
+  const [userName, setUserName] = useState<string>('Vaibhav Patil');
+  const [userAvatar, setUserAvatar] = useState<string>('💻');
+
+  // Synchronize resize listeners, load persistent state, and probe Firebase connection
   useEffect(() => {
     if (typeof window !== 'undefined') {
       setWindowWidth(window.innerWidth);
@@ -156,10 +178,39 @@ export default function App() {
         setWindowWidth(window.innerWidth);
       };
       window.addEventListener('resize', handleResize);
+      
+      // Load user details
+      const savedId = localStorage.getItem('url_uno_player_id');
+      if (savedId) {
+        setMyPlayerId(savedId);
+      } else {
+        const generated = 'player-' + Math.random().toString(36).substring(2, 9);
+        localStorage.setItem('url_uno_player_id', generated);
+        setMyPlayerId(generated);
+      }
+
+      const savedName = localStorage.getItem('url_uno_player_name');
+      if (savedName) setUserName(savedName);
+
+      const savedAvatar = localStorage.getItem('url_uno_player_avatar');
+      if (savedAvatar) setUserAvatar(savedAvatar);
+
       return () => {
         window.removeEventListener('resize', handleResize);
       };
     }
+  }, []);
+
+  // Firebase connection test probe (Mandated by security audit rules)
+  useEffect(() => {
+    const probeConnection = async () => {
+      try {
+        await getDocFromServer(doc(db, 'test-connection-probe', 'ping'));
+      } catch (err) {
+        // Safe sandbox network mode
+      }
+    };
+    probeConnection();
   }, []);
 
   // References for terminal and autoscrolls
@@ -183,6 +234,338 @@ export default function App() {
 
   const currentPlayerIndexRef = useRef<number>(currentPlayerIndex);
   currentPlayerIndexRef.current = currentPlayerIndex;
+
+  const isMultiplayerRef = useRef<boolean>(isMultiplayer);
+  isMultiplayerRef.current = isMultiplayer;
+
+  const roomIdRef = useRef<string>(roomId);
+  roomIdRef.current = roomId;
+
+  const myIndexRef = useRef<number>(myIndex);
+  myIndexRef.current = myIndex;
+
+  // Pushes incremental changes to Firestore and triggers live onSnapshot updates
+  const writeRoomSync = async (updates: Partial<any>) => {
+    if (!isMultiplayerRef.current || !roomIdRef.current) return;
+    try {
+      const roomRef = doc(db, 'rooms', roomIdRef.current);
+      await updateDoc(roomRef, {
+        ...updates,
+        updatedAt: new Date().toISOString()
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `rooms/${roomIdRef.current}`);
+    }
+  };
+
+  // Real-time synchronization subscription for Multiplayer Private Lobby/Game
+  useEffect(() => {
+    if (!isMultiplayer || !roomId) return;
+
+    const roomRef = doc(db, 'rooms', roomId);
+    const unsubscribe = onSnapshot(roomRef, (snapshot) => {
+      if (!snapshot.exists()) return;
+      const data = snapshot.data();
+      
+      // Keep synchronous references up-to-date instantly to avoid lag or async racing:
+      if (data.players) {
+        setPlayers(data.players);
+        playersRef.current = data.players;
+        
+        // Settle local index dynamically in case player list shifts
+        const lookup = data.players.findIndex((p: any) => p.id === myPlayerId);
+        if (lookup !== -1) {
+          setMyIndex(lookup);
+          myIndexRef.current = lookup;
+        }
+      }
+      if (data.currentPlayerIndex !== undefined) {
+        setCurrentPlayerIndex(data.currentPlayerIndex);
+        currentPlayerIndexRef.current = data.currentPlayerIndex;
+      }
+      if (data.discardPile) {
+        setDiscardPile(data.discardPile);
+        discardPileRef.current = data.discardPile;
+      }
+      if (data.deck) {
+        setDeck(data.deck);
+        deckRef.current = data.deck;
+      }
+      if (data.gameDirection) {
+        setGameDirection(data.gameDirection);
+        gameDirectionRef.current = data.gameDirection;
+      }
+      if (data.activeProtocol) {
+        setActiveProtocol(data.activeProtocol);
+        activeProtocolRef.current = data.activeProtocol;
+      }
+      if (data.status) {
+        setGameStatus(data.status);
+      }
+      if (data.winnerId !== undefined) {
+        setWinner(data.winnerId);
+      }
+      if (data.unoDeclared) {
+        setUnoDeclared(data.unoDeclared);
+      }
+      if (data.logs) {
+        setLogs(data.logs);
+      }
+      if (data.botSpeedMs !== undefined) {
+        setBotSpeedMs(data.botSpeedMs);
+      }
+      if (data.customUrlsInput !== undefined) {
+        setCustomUrlsInput(data.customUrlsInput);
+      }
+      if (data.speechBubbles) {
+        setActiveSpeech(data.speechBubbles);
+      }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, `rooms/${roomId}`);
+    });
+
+    return () => unsubscribe();
+  }, [isMultiplayer, roomId, myPlayerId]);
+
+  const handleCreateRoom = async (totalPlayersCount: number, fillWithBots: boolean, speed: number) => {
+    const generatedRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+    
+    const hostPlayer: Player = {
+      id: myPlayerId,
+      name: userName,
+      isBot: false,
+      cards: [],
+      avatar: userAvatar,
+      statusMsg: 'Connected as Host...',
+      analytics: { cardsPlayed: 0, cardsDrawn: 0, skipsReceived: 0 },
+    };
+
+    const initialRoomData = {
+      id: generatedRoomId,
+      hostId: myPlayerId,
+      hostName: userName,
+      status: 'setup',
+      players: [hostPlayer],
+      currentPlayerIndex: 0,
+      discardPile: [],
+      deck: [],
+      gameDirection: 'clockwise',
+      activeProtocol: 'https',
+      winnerId: null,
+      unoDeclared: {},
+      logs: [{
+        id: `log-${Math.random().toString(36).substring(2, 9)}`,
+        timestamp: new Date().toLocaleTimeString(),
+        type: 'system',
+        message: `[ROOM] Private Room ${generatedRoomId} instantiated by Host: ${userName}.`
+      }],
+      botSpeedMs: speed,
+      botCount: totalPlayersCount,
+      fillWithBots: fillWithBots,
+      customUrlsInput: customUrlsInput || '',
+      updatedAt: new Date().toISOString()
+    };
+
+    try {
+      const roomRef = doc(db, 'rooms', generatedRoomId);
+      await setDoc(roomRef, initialRoomData);
+
+      setRoomId(generatedRoomId);
+      setIsMultiplayer(true);
+      setMyIndex(0);
+      myIndexRef.current = 0;
+      addLog('success', `[SYSTEM] Private Room ${generatedRoomId} instantiated!`);
+      playSound('success');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, `rooms/${generatedRoomId}`);
+    }
+  };
+
+  const handleJoinRoom = async (targetRoomId: string) => {
+    const cleanedRoomId = targetRoomId.trim().toUpperCase();
+    if (!cleanedRoomId) return;
+
+    try {
+      const roomRef = doc(db, 'rooms', cleanedRoomId);
+      const docSnapshot = await getDoc(roomRef);
+      if (!docSnapshot.exists()) {
+        alert('Room not found! Verify code exists on centralized Firestore database.');
+        return;
+      }
+
+      const data = docSnapshot.data();
+      if (data.status !== 'setup') {
+        alert('Active play-session started! Room can no longer accept socket connection.');
+        return;
+      }
+
+      const activePlayers = data.players || [];
+      if (activePlayers.length >= 10) {
+        alert('Target server cluster full! Connection limits capped at 10 users.');
+        return;
+      }
+
+      const existingIdx = activePlayers.findIndex((p: any) => p.id === myPlayerId);
+      let nextPlayers = [...activePlayers];
+      let assignedIndex = existingIdx;
+
+      if (existingIdx === -1) {
+        const guestPlayer: Player = {
+          id: myPlayerId,
+          name: userName,
+          isBot: false,
+          cards: [],
+          avatar: userAvatar,
+          statusMsg: 'Connected Guest...',
+          analytics: { cardsPlayed: 0, cardsDrawn: 0, skipsReceived: 0 },
+        };
+        nextPlayers.push(guestPlayer);
+        assignedIndex = nextPlayers.length - 1;
+      }
+
+      const initialLogs = data.logs || [];
+      const updatedLogs = [
+        ...initialLogs,
+        {
+          id: `log-${Math.random().toString(36).substring(2, 9)}`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'info',
+          message: `[JOIN] Player ${userName} connected as client socket on seat ${assignedIndex}.`
+        }
+      ];
+
+      await updateDoc(roomRef, {
+        players: nextPlayers,
+        logs: updatedLogs,
+        updatedAt: new Date().toISOString()
+      });
+
+      setRoomId(cleanedRoomId);
+      setIsMultiplayer(true);
+      setMyIndex(assignedIndex);
+      myIndexRef.current = assignedIndex;
+      playSound('success');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `rooms/${cleanedRoomId}`);
+    }
+  };
+
+  const handleLaunchRoomGame = async () => {
+    if (!isMultiplayer || !roomId) return;
+
+    try {
+      const roomRef = doc(db, 'rooms', roomId);
+      const docSnapshot = await getDoc(roomRef);
+      if (!docSnapshot.exists()) return;
+      const data = docSnapshot.data();
+
+      let activePlayers = [...(data.players || [])];
+      const fillWithBots = data.fillWithBots;
+      const targetCount = data.botCount || 4;
+
+      // Fill with bots up to target count
+      if (fillWithBots && activePlayers.length < targetCount) {
+        const remainingSlots = targetCount - activePlayers.length;
+        for (let i = 0; i < remainingSlots; i++) {
+          const identity = BOT_IDENTITIES[i % BOT_IDENTITIES.length];
+          activePlayers.push({
+            id: `bot-${i}-${Math.random().toString(36).substring(2, 6)}`,
+            name: `CPU_${identity.name}`,
+            isBot: true,
+            cards: [],
+            avatar: identity.avatar,
+            statusMsg: 'Initializing server protocols...',
+            analytics: { cardsPlayed: 0, cardsDrawn: 0, skipsReceived: 0 },
+          });
+        }
+      }
+
+      // Base protocol compilation
+      let loadedDeck: UnoCard[] = [];
+      const urlsText = data.customUrlsInput;
+      if (urlsText && urlsText.trim().length > 0) {
+        const parsed = parseUserUrls(urlsText);
+        if (parsed.length >= 20) {
+          loadedDeck = shuffleDeck(parsed);
+          while (loadedDeck.length < 50) {
+            const duplicated = shuffleDeck(parsed).map((c) => ({
+              ...c,
+              id: `card-${Math.random().toString(36).substring(2, 11)}`,
+            }));
+            loadedDeck = [...loadedDeck, ...duplicated];
+          }
+        } else {
+          const defaults = generateDefaultDeck();
+          const customParsed = parseUserUrls(urlsText);
+          loadedDeck = shuffleDeck([...customParsed, ...defaults]);
+        }
+      } else {
+        loadedDeck = shuffleDeck(generateDefaultDeck());
+      }
+
+      // Deal cards
+      const currentDeck = [...loadedDeck];
+      activePlayers.forEach((player) => {
+        player.cards = currentDeck.splice(0, 7);
+      });
+
+      let startCardIndex = 0;
+      while (startCardIndex < currentDeck.length && currentDeck[startCardIndex].protocol === 'wild') {
+        startCardIndex++;
+      }
+      if (startCardIndex >= currentDeck.length) startCardIndex = 0;
+      const startCard = currentDeck.splice(startCardIndex, 1)[0];
+
+      const initialLogs = data.logs || [];
+      const playLogs = [
+        ...initialLogs,
+        {
+          id: `log-${Math.random().toString(36).substring(2, 9)}`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'system',
+          message: `[LAUNCH] Host transmitted startup signal. Deployed ${activePlayers.length} connection terminals.`
+        },
+        {
+          id: `log-${Math.random().toString(36).substring(2, 9)}`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'info',
+          message: `[PORT 8080] First starting packet: ${startCard.url}. Active suit: ${startCard.protocol.toUpperCase()}`
+        }
+      ];
+
+      await updateDoc(roomRef, {
+        status: 'playing',
+        players: activePlayers,
+        deck: currentDeck,
+        discardPile: [startCard],
+        currentPlayerIndex: 0,
+        gameDirection: 'clockwise',
+        activeProtocol: startCard.protocol,
+        winnerId: null,
+        unoDeclared: {},
+        logs: playLogs,
+        updatedAt: new Date().toISOString()
+      });
+
+      setIsRoomDialogOpen(false);
+      playSound('success');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `rooms/${roomId}`);
+    }
+  };
+
+  const handleLeaveRoom = () => {
+    setIsMultiplayer(false);
+    setRoomId('');
+    setMyIndex(-1);
+    myIndexRef.current = -1;
+    setPlayers([]);
+    setDeck([]);
+    setDiscardPile([]);
+    setIsRoomDialogOpen(false);
+    addLog('warn', `[SYSTEM] Disconnected raw socket links. Resumed sandboxed offline CPU terminal.`);
+    startNewGame(botCount, botSpeedMs, customUrlsInput);
+  };
 
   // Wrapper utilities to keep both state and synchronous refs perfectly in sync:
   const updateDeck = (newDeck: UnoCard[]) => {
@@ -362,18 +745,32 @@ export default function App() {
   const triggerSpeech = (playerId: string, msg: string) => {
     setActiveSpeech((prev) => ({ ...prev, [playerId]: msg }));
     playSound('play');
-    setTimeout(() => {
-      setActiveSpeech((prev) => {
-        const copy = { ...prev };
-        delete copy[playerId];
-        return copy;
+
+    if (isMultiplayerRef.current) {
+      writeRoomSync({
+        speechBubbles: { [playerId]: msg }
       });
-    }, 3000);
+      setTimeout(() => {
+        writeRoomSync({
+          speechBubbles: {}
+        });
+      }, 3000);
+    } else {
+      setTimeout(() => {
+        setActiveSpeech((prev) => {
+          const copy = { ...prev };
+          delete copy[playerId];
+          return copy;
+        });
+      }, 3000);
+    }
   };
 
   // Boot on initial impact
   useEffect(() => {
-    startNewGame(botCount, botSpeedMs, customUrlsInput);
+    if (!isMultiplayerRef.current) {
+      startNewGame(botCount, botSpeedMs, customUrlsInput);
+    }
     return () => {
       if (botTimerRef.current) clearTimeout(botTimerRef.current);
     };
@@ -412,22 +809,31 @@ export default function App() {
     updateDiscardPile(discarded);
 
     // Give cards to target player
-    updatePlayers((prev) =>
-      prev.map((p, idx) => {
-        if (idx === playerIndex) {
-          const updatedCards = [...p.cards, ...drawn];
-          return {
-            ...p,
-            cards: updatedCards,
-            analytics: {
-              ...p.analytics,
-              cardsDrawn: p.analytics.cardsDrawn + count,
-            },
-          };
-        }
-        return p;
-      })
-    );
+    const updatedPlayers = playersRef.current.map((p, idx) => {
+      if (idx === playerIndex) {
+        const updatedCards = [...p.cards, ...drawn];
+        return {
+          ...p,
+          cards: updatedCards,
+          analytics: {
+            ...p.analytics,
+            cardsDrawn: p.analytics.cardsDrawn + count,
+          },
+        };
+      }
+      return p;
+    });
+
+    updatePlayers(updatedPlayers);
+
+    // Multiplayer Cloud Sync
+    if (isMultiplayerRef.current) {
+      writeRoomSync({
+        deck: currentDeck,
+        discardPile: discarded,
+        players: updatedPlayers
+      });
+    }
 
     // If active card drawn is 1, return it for immediate feedback evaluation
     return drawn;
@@ -435,11 +841,24 @@ export default function App() {
 
   // Interactive user call UNO
   const handleDeclareUno = () => {
-    const userCards = players[0]?.cards || [];
+    const localPlayerIdx = isMultiplayerRef.current ? myIndexRef.current : 0;
+    const userCards = players[localPlayerIdx]?.cards || [];
+    const activeUser = players[localPlayerIdx];
+    if (!activeUser) return;
+
     if (userCards.length <= 2) {
-      setUnoDeclared((prev) => ({ ...prev, human: true }));
-      addLog('success', `[INFO] ${players[0].name} declared UNO! Host socket ping verified.`);
+      const updatedUno = { ...unoDeclared, [activeUser.id]: true };
+      setUnoDeclared(updatedUno);
+      const detailMsg = `[INFO] ${activeUser.name} declared UNO! Host socket ping verified.`;
+      addLog('success', detailMsg);
       playSound('uno');
+
+      if (isMultiplayerRef.current) {
+        writeRoomSync({
+          unoDeclared: updatedUno,
+          logs: [...logs, { id: `log-${Math.random().toString(36).substring(2, 9)}`, timestamp: new Date().toLocaleTimeString(), type: 'success', message: detailMsg }]
+        });
+      }
     } else {
       addLog('danger', `[FAIL] Penalty! Triggering mock headers too early. Hand still hosts ${userCards.length} packets.`);
       playSound('warn');
@@ -449,19 +868,29 @@ export default function App() {
   // Interactive firewall audit to catch lies (CATCH!)
   const handleCatchUnoLiar = () => {
     let caughtLiar = false;
+    let nextUnoDeclared = { ...unoDeclared };
 
     players.forEach((player, idx) => {
-      // Human caught a bot server with 1 card who neglected to declare UNO
+      // Human/User caught an opponent/bot with 1 card who neglected to declare UNO
       if (player.cards.length === 1 && !unoDeclared[player.id]) {
         caughtLiar = true;
-        addLog('danger', `[FIREWALL ALERT] Player caught Server ${player.name} leaking open sockets! Injecting 2 packet drops.`);
+        const alertMsg = `[FIREWALL ALERT] Player caught Server ${player.name} leaking open sockets! Injecting 2 packet drops.`;
+        addLog('danger', alertMsg);
         
         // Penalize the liar
         drawCardForPlayer(idx, 2);
         
         // Reset declaration status
-        setUnoDeclared((prev) => ({ ...prev, [player.id]: true }));
+        nextUnoDeclared[player.id] = true;
+        setUnoDeclared(nextUnoDeclared);
         playSound('alert');
+
+        if (isMultiplayerRef.current) {
+          writeRoomSync({
+            unoDeclared: nextUnoDeclared,
+            logs: [...logs, { id: `log-${Math.random().toString(36).substring(2, 9)}`, timestamp: new Date().toLocaleTimeString(), type: 'danger', message: alertMsg }]
+          });
+        }
       }
     });
 
@@ -607,13 +1036,14 @@ export default function App() {
     updateActiveProtocol(nextProtocol);
     updateCurrentPlayerIndex(nextIndex);
 
-    // Auto trigger bot declaring UNO
+    let nextUnoDeclared = { ...unoDeclared };
     if (nextHand.length === 1) {
-      if (activePlayer.isBot) {
+       if (activePlayer.isBot) {
         // 85% chance bot declares UNO instantly
         const success = Math.random() < 0.85;
         if (success) {
-          setUnoDeclared((prev) => ({ ...prev, [activePlayer.id]: true }));
+          nextUnoDeclared[activePlayer.id] = true;
+          setUnoDeclared(nextUnoDeclared);
           addLog('warn', `[ALERT] ${activePlayer.name} yelling: 'UNO!' over websockets.`);
           playSound('uno');
         } else {
@@ -624,27 +1054,60 @@ export default function App() {
         addLog('warn', `[SECURITY CHECK] Local client hand holds 1 card! Quick, declare UNO to bypass server penalties.`);
       }
     }
+
+    // Multiplayer Firestore Synchronization
+    if (isMultiplayerRef.current) {
+      const nextLogItem = {
+        id: `log-${Math.random().toString(36).substring(2, 9)}`,
+        timestamp: new Date().toLocaleTimeString(),
+        type: 'info' as const,
+        message: labelInfo
+      };
+      
+      const isGameOver = nextHand.length === 0;
+
+      writeRoomSync({
+        discardPile: [...discardPileRef.current],
+        players: playersRef.current,
+        currentPlayerIndex: nextIndex,
+        gameDirection: nextDirection,
+        activeProtocol: nextProtocol,
+        unoDeclared: nextUnoDeclared,
+        winnerId: isGameOver ? activePlayer.id : null,
+        status: isGameOver ? 'game-over' : 'playing',
+        logs: [...logs, nextLogItem]
+      });
+    }
   };
 
   // Human draws card
   const handleHumanDraw = () => {
-    if (currentPlayerIndexRef.current !== 0 || gameStatus !== 'playing' || drawnPlayableCard) return;
+    const localPlayerIdx = isMultiplayerRef.current ? myIndexRef.current : 0;
+    if (currentPlayerIndexRef.current !== localPlayerIdx || gameStatus !== 'playing' || drawnPlayableCard) return;
 
     const topCard = discardPileRef.current[discardPileRef.current.length - 1];
-    const drawn = drawCardForPlayer(0, 1)[0];
+    const drawn = drawCardForPlayer(localPlayerIdx, 1)[0];
     playSound('draw');
 
     if (drawn) {
-      addLog('info', `Local Client GET request: Drew card ${drawn.url}`);
+      const activeUser = playersRef.current[localPlayerIdx];
+      const detailLog = `${activeUser?.name || 'Local Client'} GET request: Drew card ${drawn.url}`;
+      addLog('info', detailLog);
       
       // Standard UNO: If drawn card matches, player can play it immediately!
       if (canPlayCard(drawn, topCard, activeProtocolRef.current)) {
         setDrawnPlayableCard(drawn);
         addLog('success', `[HOT_MODULE] Drawn card is playable! Decide whether to POST or KEEP.`);
       } else {
-        // Go to next player
-        const nextIndex = getNextTurnIndex(gameDirectionRef.current, 0, playersRef.current.length);
+        const nextIndex = getNextTurnIndex(gameDirectionRef.current, localPlayerIdx, playersRef.current.length);
         updateCurrentPlayerIndex(nextIndex);
+        
+        if (isMultiplayerRef.current) {
+          writeRoomSync({
+            currentPlayerIndex: nextIndex,
+            logs: [...logs, { id: `log-${Math.random().toString(36).substring(2, 9)}`, timestamp: new Date().toLocaleTimeString(), type: 'info', message: detailLog }]
+          });
+        }
       }
     }
   };
@@ -652,9 +1115,19 @@ export default function App() {
   // Keep drawn card instead of playing it
   const handleKeepDrawnCard = () => {
     setDrawnPlayableCard(null);
-    addLog('info', `Local Client decided to cache drawn card hand-buffer.`);
-    const nextIndex = getNextTurnIndex(gameDirectionRef.current, 0, playersRef.current.length);
+    const localPlayerIdx = isMultiplayerRef.current ? myIndexRef.current : 0;
+    const activeUser = playersRef.current[localPlayerIdx];
+    const detailLog = `${activeUser?.name || 'Local Client'} decided to cache drawn card hand-buffer.`;
+    addLog('info', detailLog);
+    const nextIndex = getNextTurnIndex(gameDirectionRef.current, localPlayerIdx, playersRef.current.length);
     updateCurrentPlayerIndex(nextIndex);
+
+    if (isMultiplayerRef.current) {
+      writeRoomSync({
+        currentPlayerIndex: nextIndex,
+        logs: [...logs, { id: `log-${Math.random().toString(36).substring(2, 9)}`, timestamp: new Date().toLocaleTimeString(), type: 'info', message: detailLog }]
+      });
+    }
   };
 
   // Wild Selector Resolution
@@ -697,6 +1170,15 @@ export default function App() {
       return;
     }
 
+    // MULTIPLAYER CONSTRAINT: Only the room host executes bot decisions!
+    if (isMultiplayerRef.current) {
+      const hostId = playersRef.current[0]?.id;
+      if (myPlayerId !== hostId) {
+        setIsBotThinking(true);
+        return;
+      }
+    }
+
     // Bot matches turn - compute delay move
     setIsBotThinking(true);
     updatePlayers((prev) =>
@@ -715,7 +1197,7 @@ export default function App() {
     return () => {
       if (botTimerRef.current) clearTimeout(botTimerRef.current);
     };
-  }, [currentPlayerIndex, gameStatus, turnCounter, botSpeedMs]);
+  }, [currentPlayerIndex, gameStatus, turnCounter, botSpeedMs, isMultiplayer, myPlayerId]);
 
   // Execute bot card mechanics
   const executeBotMove = () => {
@@ -875,22 +1357,22 @@ export default function App() {
     
     // Mathematically bounded overlap calculation to prevent cards from overflowing and overlapping outer buttons
     const targetCenterWidth = isMobile ? Math.max(150, windowWidth - 145) : windowWidth < 768 ? 340 : 500;
-    const cardWidth = isMobile ? 88 : 104; // fits w-22 and w-26 sizes
-    const maxOverlap = isMobile ? 32 : 46;
+    const cardWidth = isMobile ? 72 : 88; // fits w-18 and w-22 compact hand sizes
+    const maxOverlap = isMobile ? 26 : 38;
     
     let overlap = maxOverlap;
     if (total > 1) {
       overlap = (targetCenterWidth - cardWidth) / (total - 1);
-      overlap = Math.min(maxOverlap, Math.max(isMobile ? 13 : 18, overlap));
+      overlap = Math.min(maxOverlap, Math.max(isMobile ? 10 : 15, overlap));
     }
     
-    let rotateScale = isMobile ? 4.5 : 7;
+    let rotateScale = isMobile ? 4.0 : 6.5;
     if (total > 8) {
       rotateScale = rotateScale * (8 / total);
     }
     
     const rotate = diff * rotateScale;
-    const translateY = Math.abs(diff) * (total > 10 ? 1.0 : 2.2) + (diff * diff * (isMobile ? 0.35 : 0.55));
+    const translateY = Math.abs(diff) * (total > 10 ? 0.8 : 1.8) + (diff * diff * (isMobile ? 0.25 : 0.45));
     const translateX = diff * overlap;
     
     return {
@@ -904,7 +1386,7 @@ export default function App() {
       <h1 className="sr-only">URL UNO - Web Protocol Card Game Console</h1>
 
       {/* Decorative Widescreen Gaming Console Box Container */}
-      <div className="w-full max-w-5xl aspect-[1.8/1] min-h-[520px] sm:min-h-[580px] md:min-h-[630px] rounded-3xl relative border-8 border-slate-900 bg-gradient-to-b from-[#29b6f6] via-[#4fc3f7] to-[#e0f7fa] shadow-2xl overflow-hidden flex flex-col justify-between">
+      <div className="w-full max-w-5xl h-[78vh] sm:h-[82vh] min-h-[640px] sm:min-h-[700px] md:min-h-[770px] max-h-[840px] rounded-3xl relative border-8 border-slate-900 bg-gradient-to-b from-[#29b6f6] via-[#4fc3f7] to-[#e0f7fa] shadow-[0_25px_50px_-12px_rgba(0,0,0,0.55)] overflow-hidden flex flex-col justify-between">
         
         {/* Floating Cartoon Clouds Background Elements */}
         <div className="absolute inset-0 pointer-events-none z-0">
@@ -931,12 +1413,28 @@ export default function App() {
 
         {/* ----------------- TOP CONTROLS ----------------- */}
         <div className="w-full p-3 flex justify-between items-center z-30 relative pointer-events-none">
-          {/* Ticking Timer capsule */}
-          <div className="pointer-events-auto bg-gradient-to-b from-amber-300 to-orange-500 border-2 border-slate-900 text-slate-950 rounded-full flex items-center gap-1.5 px-3 py-1 sm:py-1.5 shadow-md select-none hover:scale-103 transition-transform">
-            <Clock className="w-3.5 h-3.5 text-slate-950 animate-pulse" />
-            <span className="text-[10px] sm:text-xs font-black tracking-wider font-mono leading-none">
-              {formatTimerResult(secondsElapsed)}
-            </span>
+          <div className="flex items-center gap-2 pointer-events-auto">
+            {/* Ticking Timer capsule */}
+            <div className="bg-gradient-to-b from-amber-300 to-orange-500 border-2 border-slate-900 text-slate-950 rounded-full flex items-center gap-1.5 px-3 py-1 sm:py-1.5 shadow-md select-none">
+              <Clock className="w-3.5 h-3.5 text-slate-950 animate-pulse" />
+              <span className="text-[10px] sm:text-xs font-black tracking-wider font-mono leading-none">
+                {formatTimerResult(secondsElapsed)}
+              </span>
+            </div>
+
+            {/* Private Room / Multiplayer Trigger Button */}
+            <button
+              onClick={() => setIsRoomDialogOpen(true)}
+              title="Open Private Rooms & Joins Console"
+              className={`border-2 border-slate-900 border-b-4 border-b-slate-900 hover:brightness-105 active:border-b-2 active:translate-y-[2px] rounded-full flex items-center gap-1 px-3 py-1 text-[10px] sm:text-xs font-black uppercase tracking-wider shadow-md cursor-pointer transition-all ${
+                isMultiplayer 
+                  ? 'bg-emerald-500 hover:bg-emerald-600 text-slate-950 animate-pulse' 
+                  : 'bg-rose-500 hover:bg-rose-600 text-slate-100'
+              }`}
+            >
+              <Network className="w-3.5 h-3.5" />
+              <span>{isMultiplayer ? `ROOM: ${roomId}` : 'MULTIPLAYER (10p)'}</span>
+            </button>
           </div>
 
           {/* Top Right Utilities buttons */}
@@ -962,281 +1460,292 @@ export default function App() {
         </div>
 
         {/* ================= CENTRAL TABLE ENVIRONMENT ================= */}
-        <div className="absolute top-[48%] left-1/2 -translate-x-1/2 -translate-y-1/2 w-[240px] h-[240px] sm:w-[450px] sm:h-[450px] md:w-[490px] md:h-[490px] rounded-full bg-gradient-to-tr from-emerald-600 via-emerald-500 via-green-500 to-lime-300 shadow-[inset_-10px_-10px_30px_rgba(0,0,0,0.45),_0_10px_25px_rgba(0,0,0,0.3)] flex items-center justify-center border-4 border-emerald-400/90 z-10 select-none">
-          
-          {/* Subtle Crater highlights for 3D globe styling */}
-          <div className="absolute top-8 sm:top-12 left-10 sm:left-16 w-8 sm:w-12 h-6 sm:h-8 bg-emerald-700/20 rounded-full blur-[1px] rotate-12" />
-          <div className="absolute bottom-12 sm:bottom-20 left-8 sm:left-12 w-10 sm:w-16 h-7 sm:h-10 bg-emerald-700/25 rounded-full blur-[1px] -rotate-12" />
-          <div className="absolute top-18 sm:top-28 right-10 sm:right-16 w-9 sm:w-14 h-5 sm:h-8 bg-emerald-700/15 rounded-full blur-[1px]" />
-          
-          {/* Cyberspace communication network lines */}
-          <div className="absolute inset-2 sm:inset-4 border border-emerald-300/15 rounded-full pointer-events-none" />
-          <div className="absolute inset-8 sm:inset-14 border border-emerald-300/15 rounded-full pointer-events-none" />
-          <div className="absolute inset-16 sm:inset-28 border border-emerald-300/10 rounded-full pointer-events-none" />
-          <div className="absolute top-0 bottom-0 left-1/2 w-[1px] bg-gradient-to-b from-transparent via-emerald-300/25 to-transparent pointer-events-none" />
-          <div className="absolute left-0 right-0 top-1/2 h-[1px] bg-gradient-to-r from-transparent via-emerald-300/25 to-transparent pointer-events-none" />
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-20 rotate-[-12deg] skew-x-[-10deg]">
-            <span className="text-[70px] sm:text-[140px] font-sans font-black italic tracking-tighter text-white tracking-widest drop-shadow-[2px_2px_0px_#14532d] sm:drop-shadow-[4px_4px_0px_#14532d]">
-              UNO
-            </span>
-          </div>
-
-          {/* Directional Orbit loop pointer dashboard matching clock queue */}
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none overflow-hidden rounded-full p-2 z-0">
-            <motion.div
-              animate={{ rotate: gameDirection === 'clockwise' ? 360 : -360 }}
-              transition={{ duration: 18, repeat: Infinity, ease: 'linear' }}
-              className="w-[84%] h-[84%] border-2 sm:border-4 border-dashed border-amber-400/35 rounded-full flex items-center justify-center"
+        <div 
+          style={{
+            clipPath: 'polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%)'
+          }}
+          className="absolute top-[45%] left-1/2 -translate-x-1/2 -translate-y-1/2 w-[210px] h-[210px] sm:w-[330px] sm:h-[330px] md:w-[370px] md:h-[370px] bg-gradient-to-br from-[#3e2511] via-[#1a0e05] to-[#040200] p-1 sm:p-1.5 md:p-2 shadow-[0_20px_40px_rgba(0,0,0,0.85)] z-10 select-none border border-[#1f1105]/50 flex items-center justify-center animate-fade-in"
+        >
+          {/* Beveled wood face inner edge */}
+          <div 
+            style={{
+              clipPath: 'polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%)'
+            }}
+            className="w-full h-full bg-gradient-to-tr from-[#633a19] via-[#8c5a2e] via-[#9e6a3c] to-[#4d290e] flex items-center justify-center relative p-1 sm:p-2 md:p-3 shadow-[inset_0_4px_16px_rgba(0,0,0,0.8)]"
+          >
+            {/* Center Felt Dark Inlay region */}
+            <div 
+              style={{
+                clipPath: 'polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%)'
+              }}
+              className="w-full h-full bg-gradient-to-b from-[#1b1008] via-[#110904] to-[#0d0602] border border-[#301c0a]/50 relative flex items-center justify-center p-2 shadow-[inset_0_12px_36px_rgba(0,0,0,0.9)]"
             >
-              <div className="text-[7px] sm:text-[9px] font-mono font-bold tracking-[0.2em] sm:tracking-[0.4em] text-emerald-800 uppercase select-none">
-                {gameDirection === 'clockwise' ? '>>> CLOCKWISE >>>' : '<<< REVERSE <<<'}
-              </div>
-            </motion.div>
-          </div>
+              
+              {/* Wooden Inlay guidelines */}
+              <div 
+                style={{
+                  clipPath: 'polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%)'
+                }}
+                className="absolute inset-[10px] border border-dashed border-[#5e381b]/10 pointer-events-none" 
+              />
+              <div 
+                style={{
+                  clipPath: 'polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%)'
+                }}
+                className="absolute inset-[25px] border border-[#52331b]/5 pointer-events-none" 
+              />
 
-          {/* Draw and Discard deck central panel */}
-          <div className="flex items-center justify-center gap-3 sm:gap-10 relative z-20">
-            
-            {/* Draw Stack */}
-            <div className="flex flex-col items-center gap-1">
-              <button
-                disabled={currentPlayerIndex !== 0 || gameStatus !== 'playing' || !!drawnPlayableCard}
-                onClick={handleHumanDraw}
-                className={`group relative outline-none border-0 ${
-                  currentPlayerIndex === 0 && !drawnPlayableCard
-                    ? 'cursor-pointer hover:scale-105 transition-transform'
-                    : 'opacity-80'
-                }`}
-              >
-                {/* Visual Cards stack pile underneath */}
-                <div className="absolute -bottom-1 -right-1 w-16 sm:w-24 h-24 sm:h-36 bg-slate-900 border border-slate-700 rounded-lg -z-10 shadow" />
-                <div className="absolute -bottom-2 -right-2 w-16 sm:w-24 h-24 sm:h-36 bg-slate-950 border border-slate-800 rounded-lg -z-20 shadow" />
-                
-                {/* Top draw card */}
-                <UnoCardComponent card={{} as UnoCard} faceDown={true} size="sm" />
-                
-                {currentPlayerIndex === 0 && !drawnPlayableCard && (
-                  <div className="absolute inset-0 bg-indigo-500/10 hover:bg-transparent rounded-lg flex items-center justify-center transition-colors">
-                    <span className="bg-slate-950/95 border border-amber-400 text-amber-400 text-[8px] font-mono px-1.5 py-0.5 rounded font-black uppercase tracking-wider shadow animate-bounce">
-                      DRAW
-                    </span>
-                  </div>
-                )}
-              </button>
-              <span className="text-[9px] font-mono text-emerald-950 font-extrabold uppercase mt-1">
-                DECK: {deck.length} pg
-              </span>
-            </div>
-
-            {/* Discard Pile */}
-            <div className="flex flex-col items-center gap-1">
-              {topDiscardCard ? (
-                <div className="relative">
-                  {/* Overlap background layers simulating piles */}
-                  <div className="absolute top-1 left-1 w-16 sm:w-24 h-24 sm:h-36 bg-[#090d16]/30 border border-slate-800 rounded-lg -z-10 rotate-3" />
-                  <UnoCardComponent card={topDiscardCard} size="sm" disabled={true} />
-                </div>
-              ) : (
-                <div className="w-16 sm:w-24 h-24 sm:h-36 rounded-xl border-2 border-dashed border-slate-400/50 flex items-center justify-center text-slate-850 font-mono text-xs select-none">
-                  Empty
-                </div>
-              )}
-              {topDiscardCard && (
-                <span className="text-[9px] font-mono text-emerald-950 font-extrabold uppercase mt-1">
-                  SUIT: {activeProtocol.toUpperCase()}
+              {/* UNO brand subtle textured label */}
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-[0.03] select-none rotate-[-12deg] skew-x-[-10deg]">
+                <span className="text-[70px] sm:text-[140px] font-sans font-black italic tracking-tighter text-white tracking-widest drop-shadow-[4px_4px_0px_#111]">
+                  UNO
                 </span>
-              )}
+              </div>
+
+              {/* 3D Arrow Direction flow path (Clockwise / Counter-Clockwise) */}
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <motion.svg
+                  viewBox="0 0 200 200"
+                  className={`w-[86%] h-[86%] pointer-events-none ${
+                    gameDirection === 'clockwise' ? 'text-amber-400 drop-shadow-[0_0_8px_rgba(245,158,11,0.4)]' : 'text-rose-500 drop-shadow-[0_0_8px_rgba(244,63,94,0.4)]'
+                  }`}
+                  animate={{ rotate: gameDirection === 'clockwise' ? 360 : -360 }}
+                  transition={{ duration: 16, repeat: Infinity, ease: 'linear' }}
+                >
+                  {/* Orbit Track path */}
+                  <circle
+                    cx="100"
+                    cy="100"
+                    r="72"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeDasharray="4 6"
+                    className="opacity-30"
+                  />
+                  
+                  {/* Glowing Flow curved arrows */}
+                  <g transform={gameDirection === 'clockwise' ? '' : 'translate(200 0) scale(-1 1)'}>
+                    {/* Three symmetrical glowing curved segment curves with arrowheads */}
+                    <g transform="rotate(0 100 100)">
+                      <path d="M 100 28 A 72 72 0 0 1 146 46" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+                      <polygon points="141,39 153,45 140,53" fill="currentColor" />
+                    </g>
+                    <g transform="rotate(120 100 100)">
+                      <path d="M 100 28 A 72 72 0 0 1 146 46" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+                      <polygon points="141,39 153,45 140,53" fill="currentColor" />
+                    </g>
+                    <g transform="rotate(240 100 100)">
+                      <path d="M 100 28 A 72 72 0 0 1 146 46" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
+                      <polygon points="141,39 153,45 140,53" fill="currentColor" />
+                    </g>
+                  </g>
+                </motion.svg>
+              </div>
+
+              {/* Draw and Discard deck central panel */}
+              <div className="flex items-center justify-center gap-3 sm:gap-10 relative z-20">
+                
+                {/* Draw Stack */}
+                <div className="flex flex-col items-center gap-1">
+                  <button
+                    disabled={currentPlayerIndex !== 0 || gameStatus !== 'playing' || !!drawnPlayableCard}
+                    onClick={handleHumanDraw}
+                    className={`group relative outline-none border-0 ${
+                      currentPlayerIndex === 0 && !drawnPlayableCard
+                        ? 'cursor-pointer hover:scale-105 transition-transform'
+                        : 'opacity-80'
+                    }`}
+                  >
+                    {/* Visual Cards stack pile underneath */}
+                    <div className="absolute -bottom-1 -right-1 w-16 sm:w-24 h-24 sm:h-36 bg-slate-900 border border-slate-700 rounded-lg -z-10 shadow" />
+                    <div className="absolute -bottom-2 -right-2 w-16 sm:w-24 h-24 sm:h-36 bg-slate-950 border border-slate-800 rounded-lg -z-20 shadow" />
+                    
+                    {/* Top draw card */}
+                    <UnoCardComponent card={{} as UnoCard} faceDown={true} size="sm" />
+                    
+                    {currentPlayerIndex === 0 && !drawnPlayableCard && (
+                      <div className="absolute inset-0 bg-indigo-500/10 hover:bg-transparent rounded-lg flex items-center justify-center transition-colors">
+                        <span className="bg-slate-950/95 border border-amber-400 text-amber-400 text-[8px] font-mono px-1.5 py-0.5 rounded font-black uppercase tracking-wider shadow animate-bounce">
+                          DRAW
+                        </span>
+                      </div>
+                    )}
+                  </button>
+                  <span className="text-[9px] font-mono text-amber-250/70 font-extrabold uppercase mt-1">
+                    DECK: {deck.length} pg
+                  </span>
+                </div>
+
+                {/* Discard Pile */}
+                <div className="flex flex-col items-center gap-1">
+                  {topDiscardCard ? (
+                    <div className="relative">
+                      {/* Overlap background layers simulating piles */}
+                      <div className="absolute top-1 left-1 w-16 sm:w-24 h-24 sm:h-36 bg-[#090d16]/30 border border-slate-800 rounded-lg -z-10 rotate-3" />
+                      <UnoCardComponent card={topDiscardCard} size="sm" disabled={true} />
+                    </div>
+                  ) : (
+                    <div className="w-16 sm:w-24 h-24 sm:h-36 rounded-xl border-2 border-dashed border-slate-400/50 flex items-center justify-center text-slate-850 font-mono text-xs select-none">
+                      Empty
+                    </div>
+                  )}
+                  {topDiscardCard && (
+                    <span className="text-[9px] font-mono text-amber-250/70 font-extrabold uppercase mt-1">
+                      SUIT: {activeProtocol.toUpperCase()}
+                    </span>
+                  )}
+                </div>
+
+              </div>
+
+              {/* Dynamic Active suit status ring banner overlay */}
+              <div className={`absolute bottom-1 sm:bottom-2 px-3 py-1 rounded-full border ${activeProtoDetails.borderColor} ${activeProtoDetails.bgColor} flex items-center gap-1.5 shadow-md z-30 pointer-events-none scale-80 sm:scale-95`}>
+                {activeProtoDetails.icon}
+                <span className="text-[8px] sm:text-[10px] font-mono font-bold tracking-wider uppercase text-slate-100">
+                  ACTIVE SUIT: <span className={activeProtoDetails.textColor}>{activeProtocol.toUpperCase()}</span>
+                </span>
+              </div>
+
             </div>
-
           </div>
-
-          {/* Dynamic Active suit status ring banner overlay */}
-          <div className={`absolute top-[68%] px-3 py-1 rounded-full border ${activeProtoDetails.borderColor} ${activeProtoDetails.bgColor} flex items-center gap-1.5 shadow-md z-30 pointer-events-none scale-90`}>
-            {activeProtoDetails.icon}
-            <span className="text-[9px] font-mono font-bold tracking-wider uppercase text-slate-100">
-              ACTIVE SUIT: <span className={activeProtoDetails.textColor}>{activeProtocol.toUpperCase()}</span>
-            </span>
-          </div>
-
         </div>
 
         {/* ================= SIDES PLAYERS CARDS & AVATARS ================= */}
+        {(() => {
+          const renderedPlayersList = (() => {
+            if (players.length === 0) return [];
+            const localIdx = isMultiplayer ? myIndex : 0;
+            if (localIdx === -1 || localIdx >= players.length) return players;
+            return [...players.slice(localIdx), ...players.slice(0, localIdx)];
+          })();
 
-        {/* ---------- BOT 0: RUSHIKESH (LEFT CENTER) ---------- */}
-        {players[1] ? (
-          <div className="absolute left-3 sm:left-4 top-[48%] -translate-y-1/2 flex flex-col items-center gap-1.5 z-20">
-            {/* Action Speeches bubble overlay */}
-            {activeSpeech[players[1].id] && (
-              <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-white text-slate-850 font-sans font-bold text-[10px] px-2.5 py-1.5 rounded-xl shadow-xl border-2 border-slate-900 animate-bounce whitespace-nowrap z-50">
-                {activeSpeech[players[1].id]}
-                <div className="absolute top-[96%] left-1/2 -translate-x-1/2 w-2 h-2 bg-white border-r-2 border-b-2 border-slate-900 rotate-45" />
-              </div>
-            )}
+          const opponents = renderedPlayersList.slice(1);
+          const numOpponents = opponents.length;
+
+          // Distribute opponent count clockwise
+          let leftCount = 0;
+          let topCount = 0;
+          let rightCount = 0;
+
+          for (let i = 0; i < numOpponents; i++) {
+            if (i % 3 === 0) leftCount++;
+            else if (i % 3 === 1) topCount++;
+            else rightCount++;
+          }
+
+          let leftIdx = 0;
+          let topIdx = 0;
+          let rightIdx = 0;
+
+          return opponents.map((oppPlayer, idx) => {
+            const originalIndex = players.indexOf(oppPlayer);
             
-            {/* Speech bubble status from player logic */}
-            {!activeSpeech[players[1].id] && players[1].statusMsg && currentPlayerIndex === 1 && (
-              <div className="absolute -top-10 left-12 bg-slate-950/85 border border-slate-700 text-xs px-2 py-0.5 rounded shadow text-slate-300 font-mono max-w-[130px] truncate">
-                {players[1].statusMsg}
-              </div>
-            )}
+            let side: 'left' | 'top' | 'right' = 'left';
+            let sideIndex = 0;
+            let sideTotal = 1;
 
-            {/* Profile circular avatar box */}
-            <div className={`relative px-1 pb-1 pt-1.5 rounded-2xl border-4 ${
-              currentPlayerIndex === 1
-                ? 'bg-amber-300 border-slate-900 text-slate-950 shadow-md scale-105'
-                : 'bg-emerald-900 border-slate-900 text-white'
-            } transition-all flex flex-col items-center w-18 h-18 text-center shadow`}>
-              <span className="text-xl leading-none">{players[1].avatar}</span>
-              <span className="text-[10px] font-sans font-bold truncate max-w-[62px] mt-1 text-slate-900">
-                {players[1].name}
-              </span>
-              <span className="text-[8px] font-mono font-bold text-emerald-100 bg-slate-950/40 px-1 rounded block mt-0.5">
-                {players[1].cards.length} cards
-              </span>
-              
-              {/* Leaking leak alert UNO bubble */}
-              {players[1].cards.length === 1 && !unoDeclared[players[1].id] && (
-                <div className="absolute -top-2.5 -right-2 bg-rose-600 text-white font-mono font-bold text-[7px] px-1 rounded animate-bounce border border-rose-400 uppercase">
-                  PING!
-                </div>
-              )}
-            </div>
+            if (idx % 3 === 0) {
+              side = 'left';
+              sideIndex = leftIdx++;
+              sideTotal = leftCount;
+            } else if (idx % 3 === 1) {
+              side = 'top';
+              sideIndex = topIdx++;
+              sideTotal = topCount;
+            } else {
+              side = 'right';
+              sideIndex = rightIdx++;
+              sideTotal = rightCount;
+            }
 
-            {/* Core fanning card indicator along border dome */}
-            <div className="relative h-14 w-20 flex items-center justify-center">
-              {Array.from({ length: Math.min(8, players[1].cards.length) }).map((_, idx) => {
-                const style = getFanStyle(idx, Math.min(8, players[1].cards.length), 'left');
-                return (
-                  <div key={idx} className="absolute" style={style}>
-                    <UnoCardComponent card={{} as UnoCard} faceDown={true} size="xs" disabled={true} />
+            // Absolute positioning depending on side, with responsive adjustments
+            let containerStyle: React.CSSProperties = {};
+            const isMobile = windowWidth < 640;
+
+            if (side === 'left') {
+              containerStyle = {
+                position: 'absolute',
+                left: isMobile ? '8px' : '16px',
+                top: `${20 + (sideIndex + 0.5) * (45 / sideTotal)}%`,
+                transform: 'translateY(-50%)',
+              };
+            } else if (side === 'right') {
+              containerStyle = {
+                position: 'absolute',
+                right: isMobile ? '8px' : '16px',
+                top: `${20 + (sideIndex + 0.5) * (45 / sideTotal)}%`,
+                transform: 'translateY(-50%)',
+              };
+            } else { // top side
+              containerStyle = {
+                position: 'absolute',
+                top: isMobile ? '8px' : '16px',
+                left: `${15 + (sideIndex + 0.5) * (70 / sideTotal)}%`,
+                transform: 'translateX(-50%)',
+              };
+            }
+
+            const isActiveTurn = currentPlayerIndex === originalIndex;
+
+            return (
+              <div 
+                key={oppPlayer.id} 
+                style={containerStyle}
+                className="flex flex-col items-center gap-1 z-20"
+              >
+                {/* Active spoken speech bubble overlay */}
+                {activeSpeech[oppPlayer.id] && (
+                  <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-white text-slate-850 font-sans font-bold text-[10px] px-2.5 py-1.5 rounded-xl shadow-xl border-2 border-slate-900 animate-bounce whitespace-nowrap z-50">
+                    {activeSpeech[oppPlayer.id]}
+                    <div className="absolute top-[96%] left-1/2 -translate-x-1/2 w-2 h-2 bg-white border-r-2 border-b-2 border-slate-900 rotate-45" />
                   </div>
-                );
-              })}
-            </div>
-          </div>
-        ) : (
-          <div className="absolute left-4 top-[48%] -translate-y-1/2 flex flex-col items-center gap-1 bg-slate-950/40 border border-dashed border-slate-800 p-3 rounded-2xl z-20">
-            <span className="text-[8px] font-mono text-slate-500 uppercase">OFFLINE_PORT</span>
-          </div>
-        )}
+                )}
+                
+                {/* Speech status description */}
+                {!activeSpeech[oppPlayer.id] && oppPlayer.statusMsg && isActiveTurn && (
+                  <div className="absolute -top-10 left-1/2 -translate-x-1/2 bg-slate-950/85 border border-slate-700 text-[10px] sm:text-xs px-2 py-0.5 rounded shadow text-slate-300 font-mono whitespace-nowrap max-w-[130px] truncate">
+                    {oppPlayer.statusMsg}
+                  </div>
+                )}
 
-        {/* ---------- BOT 1: JAYDEEP JOSHI (TOP CENTER) ---------- */}
-        {players[2] ? (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1 z-20">
-            {/* Actively spoken quote speech bubble overlay */}
-            {activeSpeech[players[2].id] && (
-              <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-white text-slate-850 font-sans font-bold text-[10px] px-2.5 py-1.5 rounded-xl shadow-xl border-2 border-slate-900 animate-bounce whitespace-nowrap z-50">
-                {activeSpeech[players[2].id]}
-                <div className="absolute top-[96%] left-1/2 -translate-x-1/2 w-2 h-2 bg-white border-r-2 border-b-2 border-slate-900 rotate-45" />
-              </div>
-            )}
-
-            {!activeSpeech[players[2].id] && players[2].statusMsg && currentPlayerIndex === 2 && (
-              <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 bg-slate-950/85 border border-slate-700 text-xs px-2 py-0.5 rounded shadow text-slate-300 font-mono">
-                {players[2].statusMsg}
-              </div>
-            )}
-
-            {/* Profile Container */}
-            <div className={`relative px-2 py-1 rounded-2xl border-4 ${
-              currentPlayerIndex === 2
-                ? 'bg-amber-300 border-slate-900 text-slate-950 shadow-md scale-105'
-                : 'bg-emerald-900 border-slate-900 text-white'
-            } transition-all flex flex-col items-center text-center shadow`}>
-              <div className="flex items-center gap-1.5">
-                <span className="text-lg leading-none">{players[2].avatar}</span>
-                <div className="text-left">
-                  <span className="text-[10px] font-sans font-black leading-none block truncate max-w-[80px] text-slate-900">
-                    {players[2].name}
+                {/* Profile wrapper bubble */}
+                <div className={`relative px-1.5 pb-1 pt-1 rounded-2xl border-4 ${
+                  isActiveTurn
+                    ? 'bg-amber-300 border-slate-900 text-slate-950 shadow-md scale-103'
+                    : 'bg-emerald-950 border-slate-900 text-white'
+                } transition-all flex flex-col items-center justify-center text-center shadow w-16 h-16 sm:w-18 sm:h-18`}>
+                  <span className="text-lg leading-none">{oppPlayer.avatar}</span>
+                  <span className="text-[9px] sm:text-[10px] font-sans font-bold truncate max-w-[55px] sm:max-w-[62px] mt-0.5 text-slate-900">
+                    {oppPlayer.name}
                   </span>
-                  <span className="text-[8px] font-mono font-bold text-slate-100 mt-0.5 leading-none block">
-                    {players[2].cards.length} PACKETS
+                  <span className="text-[8px] font-mono font-bold text-emerald-100 bg-slate-900/40 px-1 rounded block mt-0.5 whitespace-nowrap leading-tight">
+                    {oppPlayer.cards.length} pkg
                   </span>
+                  
+                  {/* PING warnings */}
+                  {oppPlayer.cards.length === 1 && !unoDeclared[oppPlayer.id] && (
+                    <div className="absolute -top-2.5 -right-2 bg-rose-600 text-white font-mono font-bold text-[7px] px-1 rounded animate-bounce border border-rose-400 uppercase">
+                      PING!
+                    </div>
+                  )}
+                </div>
+
+                {/* Fanning packets deck */}
+                <div className="relative h-12 w-20 flex items-center justify-center">
+                  {Array.from({ length: Math.min(6, oppPlayer.cards.length) }).map((_, fanIdx) => {
+                    const style = getFanStyle(fanIdx, Math.min(6, oppPlayer.cards.length), side);
+                    return (
+                      <div key={fanIdx} className="absolute" style={style}>
+                        <UnoCardComponent card={{} as UnoCard} faceDown={true} size="xs" disabled={true} />
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
-
-              {/* Ping warning logo */}
-              {players[2].cards.length === 1 && !unoDeclared[players[2].id] && (
-                <div className="absolute -top-2 -right-3 bg-rose-600 text-white font-mono font-bold text-[7px] px-1 rounded animate-bounce border border-rose-400 uppercase">
-                  PING!
-                </div>
-              )}
-            </div>
-
-            {/* Fanning packets card deck */}
-            <div className="relative h-10 w-24 flex items-center justify-center">
-              {Array.from({ length: Math.min(8, players[2].cards.length) }).map((_, idx) => {
-                const style = getFanStyle(idx, Math.min(8, players[2].cards.length), 'top');
-                return (
-                  <div key={idx} className="absolute" style={style}>
-                    <UnoCardComponent card={{} as UnoCard} faceDown={true} size="xs" disabled={true} />
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        ) : (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1 bg-slate-950/40 border border-dashed border-slate-800 p-2 rounded-2xl z-20">
-            <span className="text-[8px] font-mono text-slate-500">CLOSED_SOCKET</span>
-          </div>
-        )}
-
-        {/* ---------- BOT 2: GUEST055985 (RIGHT CENTER) ---------- */}
-        {players[3] ? (
-          <div className="absolute right-3 sm:right-4 top-[48%] -translate-y-1/2 flex flex-col items-center gap-1.5 z-20">
-            {/* Actively spoken quote speech bubble overlay */}
-            {activeSpeech[players[3].id] && (
-              <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-white text-slate-850 font-sans font-bold text-[10px] px-2.5 py-1.5 rounded-xl shadow-xl border-2 border-slate-900 animate-bounce whitespace-nowrap z-50">
-                {activeSpeech[players[3].id]}
-                <div className="absolute top-[96%] left-1/2 -translate-x-1/2 w-2 h-2 bg-white border-r-2 border-b-2 border-slate-900 rotate-45" />
-              </div>
-            )}
-
-            {!activeSpeech[players[3].id] && players[3].statusMsg && currentPlayerIndex === 3 && (
-              <div className="absolute -top-10 right-12 bg-slate-950/85 border border-slate-700 text-xs px-2 py-0.5 rounded shadow text-slate-300 font-mono max-w-[130px] truncate">
-                {players[3].statusMsg}
-              </div>
-            )}
-
-            {/* Profile Circle Avatar container with beautiful golden active outline! */}
-            <div className={`relative px-1 pb-1 pt-1.5 rounded-2xl border-4 ${
-              currentPlayerIndex === 3
-                ? 'bg-amber-300 border-slate-900 text-slate-950 shadow-md scale-105'
-                : 'bg-emerald-900 border-slate-900 text-white'
-            } transition-all flex flex-col items-center w-18 h-18 text-center shadow`}>
-              <span className="text-xl leading-none">{players[3].avatar}</span>
-              <span className="text-[10px] font-sans font-bold truncate max-w-[62px] mt-1 text-slate-900">
-                {players[3].name}
-              </span>
-              <span className="text-[8px] font-mono font-bold text-emerald-100 bg-slate-950/40 px-1 rounded block mt-0.5">
-                {players[3].cards.length} cards
-              </span>
-
-              {/* Ping warning logo */}
-              {players[3].cards.length === 1 && !unoDeclared[players[3].id] && (
-                <div className="absolute -top-2.5 -left-2 bg-rose-600 text-white font-mono font-bold text-[7px] px-1 rounded animate-bounce border border-rose-400 uppercase">
-                  PING!
-                </div>
-              )}
-            </div>
-
-            {/* Dynamic Card fan deck rotated outwards */}
-            <div className="relative h-14 w-20 flex items-center justify-center">
-              {Array.from({ length: Math.min(8, players[3].cards.length) }).map((_, idx) => {
-                const style = getFanStyle(idx, Math.min(8, players[3].cards.length), 'right');
-                return (
-                  <div key={idx} className="absolute" style={style}>
-                    <UnoCardComponent card={{} as UnoCard} faceDown={true} size="xs" disabled={true} />
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        ) : (
-          <div className="absolute right-4 top-[48%] -translate-y-1/2 flex flex-col items-center gap-1 bg-slate-950/40 border border-dashed border-slate-800 p-3 rounded-2xl z-20">
-            <span className="text-[8px] font-mono text-slate-500 uppercase">CLOSED_PORT</span>
-          </div>
-        )}
+            );
+          });
+        })()}
 
 
         {/* ---------- SPEAKER MUTE AUDIO BUTTON ---------- */}
@@ -1269,74 +1778,82 @@ export default function App() {
           </div>
 
           {/* ----- BOTTOM CENTER: VAIBHAV PATIL (YOUR HAND) ----- */}
-          <div className="pointer-events-auto flex flex-col items-center w-full max-w-[300px] sm:max-w-[440px] md:max-w-[600px] mb-0 relative group z-30">
-            
-            {/* Actively spoken quote speech bubble overlay */}
-            {activeSpeech['human'] && (
-              <div className="absolute bottom-[235px] left-1/2 -translate-x-1/2 bg-white text-slate-850 font-sans font-bold text-[11px] px-3.5 py-1.5 rounded-xl shadow-xl border-2 border-slate-900 animate-bounce whitespace-nowrap z-50">
-                {activeSpeech['human']}
-                <div className="absolute top-[96%] left-1/2 -translate-x-1/2 w-2.5 h-2.5 bg-white border-r-2 border-b-2 border-slate-900 rotate-45" />
-              </div>
-            )}
+          {(() => {
+            const localPlayerIdx = isMultiplayer ? myIndex : 0;
+            const humanPlayerObj = players[localPlayerIdx];
+            if (!humanPlayerObj) return null;
 
-            {/* State instruction header bar */}
-            <div className="absolute top-[-70px] left-1/2 -translate-x-1/2 bg-slate-950/80 border border-slate-800 rounded-full px-4 py-1.5 flex items-center gap-1.5 shadow backdrop-blur whitespace-nowrap">
-              <span className={`w-2.5 h-2.5 rounded-full ${currentPlayerIndex === 0 ? 'bg-emerald-500 animate-ping' : 'bg-slate-700'}`} />
-              <span className="text-[11px] font-mono text-slate-200">
-                {currentPlayerIndex === 0 ? (
-                  <span className="text-emerald-400 font-extrabold uppercase">YOUR TURN: POST PACKET SUIT</span>
-                ) : (
-                  <span className="text-slate-400 font-semibold uppercase">WAITING_ON_OPS...</span>
-                )}
-              </span>
-            </div>
+            const isYourTurn = currentPlayerIndex === localPlayerIdx;
 
-            {/* Hand fanning array viewport container: larger, bottom-aligned, pb-12 creates space for name tag */}
-            <div className="relative h-32 sm:h-36 w-full flex items-end justify-center z-10 select-none pb-12">
-              {players[0]?.cards?.map((card, idx) => {
-                const isPlayable = currentPlayerIndex === 0 && !drawnPlayableCard && canPlayCard(card, topDiscardCard, activeProtocol);
-                const fanStyle = getHumanCardStyle(idx, players[0].cards.length);
-                return (
-                  <div
-                    key={card.id}
-                    className="absolute cursor-pointer transition-transform duration-200 origin-bottom hover:!z-50"
-                    style={fanStyle}
-                  >
-                    {/* Hover slider helper using nested wrapper styling to avoid jitter */}
-                    <div className="hover:-translate-y-8 hover:scale-[1.03] transition-all duration-200 ease-out origin-bottom">
-                      <UnoCardComponent
-                        card={card}
-                        size="hand"
-                        isPlayable={isPlayable}
-                        disabled={!isPlayable}
-                        onClick={() => {
-                          if (isPlayable) playCardFromHand(0, card.id);
-                        }}
-                      />
-                    </div>
+            return (
+              <div className="pointer-events-auto flex flex-col items-center w-full max-w-[300px] sm:max-w-[440px] md:max-w-[600px] mb-0 relative group z-30">
+                {/* Actively spoken quote speech bubble overlay */}
+                {activeSpeech[humanPlayerObj.id] && (
+                  <div className="absolute bottom-[235px] left-1/2 -translate-x-1/2 bg-white text-slate-850 font-sans font-bold text-[11px] px-3.5 py-1.5 rounded-xl shadow-xl border-2 border-slate-900 animate-bounce whitespace-nowrap z-50">
+                    {activeSpeech[humanPlayerObj.id]}
+                    <div className="absolute top-[96%] left-1/2 -translate-x-1/2 w-2.5 h-2.5 bg-white border-r-2 border-b-2 border-slate-900 rotate-45" />
                   </div>
-                );
-              })}
+                )}
 
-              {players[0]?.cards?.length === 0 && (
-                <div className="w-48 h-20 flex items-center justify-center border border-dashed border-slate-700 rounded-xl text-slate-500 font-mono text-xs mb-10">
-                  Awaiting connection...
+                {/* State instruction header bar */}
+                <div className="absolute top-[-70px] left-1/2 -translate-x-1/2 bg-slate-950/80 border border-slate-800 rounded-full px-4 py-1.5 flex items-center gap-1.5 shadow backdrop-blur whitespace-nowrap">
+                  <span className={`w-2.5 h-2.5 rounded-full ${isYourTurn ? 'bg-emerald-500 animate-ping' : 'bg-slate-700'}`} />
+                  <span className="text-[11px] font-mono text-slate-200">
+                    {isYourTurn ? (
+                      <span className="text-emerald-400 font-extrabold uppercase">YOUR TURN: POST PACKET SUIT</span>
+                    ) : (
+                      <span className="text-slate-400 font-semibold uppercase">WAITING_ON_OPS...</span>
+                    )}
+                  </span>
                 </div>
-              )}
-            </div>
 
-            {/* Capsule Name Tag with Active golden ring highlight */}
-            <div className={`mt-0 px-4 py-1 rounded-full border-2 relative z-20 ${
-              currentPlayerIndex === 0
-                ? 'bg-amber-300 border-slate-900 text-slate-950 shadow-md'
-                : 'bg-slate-900 border-slate-800 text-slate-100'
-            } transition-all duration-200`}>
-              <span className="font-sans font-black text-[11px] uppercase tracking-wider block">
-                {players[0]?.name || 'Vaibhav Patil'} ({players[0]?.cards?.length || 0} PKTS)
-              </span>
-            </div>
+                {/* Hand fanning array viewport container: larger, bottom-aligned, compact padding to avoid layout occlusion */}
+                <div className="relative h-26 sm:h-30 w-full flex items-end justify-center z-10 select-none pb-3 sm:pb-4">
+                  {humanPlayerObj.cards?.map((card, idx) => {
+                    const isPlayable = isYourTurn && !drawnPlayableCard && canPlayCard(card, topDiscardCard, activeProtocol);
+                    const fanStyle = getHumanCardStyle(idx, humanPlayerObj.cards.length);
+                    return (
+                      <div
+                        key={`${card.id}-${idx}`}
+                        className="absolute cursor-pointer transition-transform duration-200 origin-bottom hover:!z-50"
+                        style={fanStyle}
+                      >
+                        {/* Hover slider helper using nested wrapper styling to avoid jitter */}
+                        <div className="hover:-translate-y-8 hover:scale-[1.03] transition-all duration-200 ease-out origin-bottom">
+                          <UnoCardComponent
+                            card={card}
+                            size="hand"
+                            isPlayable={isPlayable}
+                            disabled={!isPlayable}
+                            onClick={() => {
+                              if (isPlayable) playCardFromHand(localPlayerIdx, card.id);
+                            }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
 
-          </div>
+                  {humanPlayerObj.cards?.length === 0 && (
+                    <div className="w-48 h-20 flex items-center justify-center border border-dashed border-slate-700 rounded-xl text-slate-500 font-mono text-xs mb-3">
+                      Awaiting connection...
+                    </div>
+                  )}
+                </div>
+
+                {/* Capsule Name Tag with Active golden ring highlight */}
+                <div className={`mt-0 px-4 py-1 rounded-full border-2 relative z-20 ${
+                  isYourTurn
+                    ? 'bg-amber-300 border-slate-900 text-slate-950 shadow-md'
+                    : 'bg-slate-900 border-slate-800 text-slate-100'
+                } transition-all duration-200`}>
+                  <span className="font-sans font-black text-[11px] uppercase tracking-wider block">
+                    {humanPlayerObj.name} ({humanPlayerObj.cards?.length || 0} PKTS)
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* ----- BOTTOM RIGHT: THE 3D RED "CALL UNO" PUSH-BUTTON ----- */}
           <div className="pointer-events-auto flex flex-col items-center">
@@ -1476,6 +1993,24 @@ export default function App() {
 
         {/* 5. POPUP PROTOCOL COLOR CHOICE DIALOG */}
         <ColorChooserDialog isOpen={isColorChooserOpen} onSelect={resolveWildSelection} />
+
+        {/* 5.5 PRIVATE MULTIPLAYER ROOM DIALOG */}
+        <PrivateRoomDialog
+          isOpen={isRoomDialogOpen}
+          onClose={() => setIsRoomDialogOpen(false)}
+          myPlayerId={myPlayerId}
+          roomId={roomId}
+          isMultiplayer={isMultiplayer}
+          players={players}
+          onJoinRoom={handleJoinRoom}
+          onCreateRoom={handleCreateRoom}
+          onLaunchGame={handleLaunchRoomGame}
+          onLeaveRoom={handleLeaveRoom}
+          userName={userName}
+          onChangeUserName={setUserName}
+          userAvatar={userAvatar}
+          onChangeUserAvatar={setUserAvatar}
+        />
 
         {/* 6. GAME OVER POPUP PANEL */}
         {gameStatus === 'game-over' && (

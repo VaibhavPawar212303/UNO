@@ -1,0 +1,87 @@
+{
+  "entities": {
+    "Room": {
+      "title": "Private Game Room",
+      "description": "Represents a private game lobby or active game container for URL UNO",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique 6-character uppercase room code"
+        },
+        "hostId": {
+          "type": "string",
+          "description": "Unique identifier of the room creator"
+        },
+        "hostName": {
+          "type": "string",
+          "description": "Display name of the host user"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["setup", "playing", "game-over"],
+          "description": "Execution state of the active gameplay"
+        },
+        "players": {
+          "type": "array",
+          "description": "Array of Player entities with card and stats buffers"
+        },
+        "currentPlayerIndex": {
+          "type": "integer",
+          "description": "Index representing the active player cursor"
+        },
+        "discardPile": {
+          "type": "array",
+          "description": "Array of UnoCard cards placed on discard pile"
+        },
+        "drawPile": {
+          "type": "array",
+          "description": "Array of UnoCard cards residing inside draw buffer"
+        },
+        "gameDirection": {
+          "type": "string",
+          "enum": ["clockwise", "counter-clockwise"],
+          "description": "Traversal queue rotation direction"
+        },
+        "activeProtocol": {
+          "type": "string",
+          "description": "The active suit protocol (https, http, ftp, ws)"
+        },
+        "winnerId": {
+          "type": "string",
+          "description": "ID of player who completed transmission first"
+        },
+        "unoDeclared": {
+          "type": "object",
+          "description": "Map representing UNO flags per player"
+        },
+        "logs": {
+          "type": "array",
+          "description": "Sequence of standard game logs"
+        },
+        "chatMessages": {
+          "type": "array",
+          "description": "Array of serialized real-time chat messages between players"
+        },
+        "botSpeedMs": {
+          "type": "integer",
+          "description": "Millisecond bot move timing constraint"
+        },
+        "customUrlsInput": {
+          "type": "string",
+          "description": "Host-provided custom URL deck inputs"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp for synchronization"
+        }
+      }
+    }
+  },
+  "firestore": {
+    "rooms/{roomId}": {
+      "schema": "Room",
+      "description": "Lobby and gameplay state documents for synchronized private rooms"
+    }
+  }
+}
