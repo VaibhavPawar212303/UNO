@@ -41,6 +41,31 @@ import { doc, setDoc, updateDoc, getDoc, getDocFromServer, onSnapshot } from 'fi
 import { PrivateRoomDialog } from './components/PrivateRoomDialog';
 import { Network } from 'lucide-react';
 
+// Group and sort player cards by protocol (color) for better spatial organization
+const sortUserCards = (cards: UnoCard[]) => {
+  if (!cards) return [];
+  const protocolOrder: Record<Protocol, number> = { https: 0, http: 1, ftp: 2, ws: 3, wild: 4 };
+  const typeOrder: Record<string, number> = { number: 0, skip: 1, reverse: 2, draw2: 3, wild: 4, wild4: 5 };
+  
+  return [...cards].sort((a, b) => {
+    const protoA = protocolOrder[a.protocol] ?? 99;
+    const protoB = protocolOrder[b.protocol] ?? 99;
+    if (protoA !== protoB) {
+      return protoA - protoB;
+    }
+    
+    // Within same protocol, sort by type
+    const typeA = typeOrder[a.type] ?? 99;
+    const typeB = typeOrder[b.type] ?? 99;
+    if (typeA !== typeB) {
+      return typeA - typeB;
+    }
+    
+    // Within same type, sort by value
+    return String(a.value).localeCompare(String(b.value), undefined, { numeric: true });
+  });
+};
+
 // Sound synthesis helper using standard browser procedural Audio Web API
 const synthSound = (type: 'play' | 'draw' | 'uno' | 'warn' | 'success' | 'alert') => {
   try {
@@ -155,6 +180,8 @@ export default function App() {
 
   // New Immersion visual states
   const [secondsElapsed, setSecondsElapsed] = useState<number>(0);
+  const [timeLimitMinutes, setTimeLimitMinutes] = useState<number>(0);
+  const [gameStartedAt, setGameStartedAt] = useState<string | null>(null);
   const [activeSpeech, setActiveSpeech] = useState<{ [playerId: string]: string }>({});
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isLogsOpen, setIsLogsOpen] = useState<boolean>(false);
@@ -170,6 +197,16 @@ export default function App() {
   const [userName, setUserName] = useState<string>('Vaibhav Patil');
   const [userAvatar, setUserAvatar] = useState<string>('💻');
 
+  const handleSetUserName = (name: string) => {
+    setUserName(name);
+    localStorage.setItem('url_uno_player_name', name);
+  };
+
+  const handleSetUserAvatar = (avatar: string) => {
+    setUserAvatar(avatar);
+    localStorage.setItem('url_uno_player_avatar', avatar);
+  };
+
   // Synchronize resize listeners, load persistent state, and probe Firebase connection
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -180,20 +217,101 @@ export default function App() {
       window.addEventListener('resize', handleResize);
       
       // Load user details
-      const savedId = localStorage.getItem('url_uno_player_id');
-      if (savedId) {
-        setMyPlayerId(savedId);
-      } else {
-        const generated = 'player-' + Math.random().toString(36).substring(2, 9);
-        localStorage.setItem('url_uno_player_id', generated);
-        setMyPlayerId(generated);
+      let currentId = localStorage.getItem('url_uno_player_id');
+      if (!currentId) {
+        currentId = 'player-' + Math.random().toString(36).substring(2, 9);
+        localStorage.setItem('url_uno_player_id', currentId);
       }
+      setMyPlayerId(currentId);
 
       const savedName = localStorage.getItem('url_uno_player_name');
+      const finalName = savedName || userName;
       if (savedName) setUserName(savedName);
 
       const savedAvatar = localStorage.getItem('url_uno_player_avatar');
+      const finalAvatar = savedAvatar || userAvatar;
       if (savedAvatar) setUserAvatar(savedAvatar);
+
+      // Restore Room on Reload & sync from URL query
+      const restoreRoomSync = async (playerId: string, name: string, avatar: string) => {
+        try {
+          const params = new URLSearchParams(window.location.search);
+          const roomParam = params.get('room');
+          const savedRoomId = localStorage.getItem('url_uno_active_room_id');
+          const targetRoomId = (roomParam || savedRoomId || '').trim().toUpperCase();
+
+          if (!targetRoomId) return;
+
+          const roomRef = doc(db, 'rooms', targetRoomId);
+          const docSnapshot = await getDoc(roomRef);
+          if (!docSnapshot.exists()) {
+            localStorage.removeItem('url_uno_active_room_id');
+            const cleanUrl = window.location.pathname;
+            window.history.replaceState(null, '', cleanUrl);
+            return;
+          }
+
+          const data = docSnapshot.data();
+          const activePlayers = data.players || [];
+          const existingIdx = activePlayers.findIndex((p: any) => p.id === playerId);
+
+          if (existingIdx !== -1) {
+            setRoomId(targetRoomId);
+            setIsMultiplayer(true);
+            setMyIndex(existingIdx);
+            myIndexRef.current = existingIdx;
+            
+            localStorage.setItem('url_uno_active_room_id', targetRoomId);
+            const nextUrl = window.location.pathname + `?room=${targetRoomId}`;
+            window.history.replaceState(null, '', nextUrl);
+            
+            addLog('success', `[SYSTEM] Reconnected to active Room ${targetRoomId} successfully.`);
+          } else {
+            if (data.status === 'setup' && activePlayers.length < 10) {
+              const guestPlayer: Player = {
+                id: playerId,
+                name: name,
+                isBot: false,
+                cards: [],
+                avatar: avatar,
+                statusMsg: 'Connected Guest...',
+                analytics: { cardsPlayed: 0, cardsDrawn: 0, skipsReceived: 0 },
+              };
+              const nextPlayers = [...activePlayers, guestPlayer];
+              const assignedIndex = nextPlayers.length - 1;
+
+              const updatedLogs = [
+                ...(data.logs || []),
+                {
+                  id: `log-${Math.random().toString(36).substring(2, 9)}`,
+                  timestamp: new Date().toLocaleTimeString(),
+                  type: 'info',
+                  message: `[JOIN] Player ${name} auto-reconnected on seat ${assignedIndex}.`
+                }
+              ];
+
+              await updateDoc(roomRef, {
+                players: nextPlayers,
+                logs: updatedLogs,
+                updatedAt: new Date().toISOString()
+              });
+
+              setRoomId(targetRoomId);
+              setIsMultiplayer(true);
+              setMyIndex(assignedIndex);
+              myIndexRef.current = assignedIndex;
+              localStorage.setItem('url_uno_active_room_id', targetRoomId);
+              
+              const nextUrl = window.location.pathname + `?room=${targetRoomId}`;
+              window.history.replaceState(null, '', nextUrl);
+            }
+          }
+        } catch (err) {
+          console.error("Auto-reconnection failed", err);
+        }
+      };
+
+      restoreRoomSync(currentId, finalName, finalAvatar);
 
       return () => {
         window.removeEventListener('resize', handleResize);
@@ -320,6 +438,12 @@ export default function App() {
       if (data.speechBubbles) {
         setActiveSpeech(data.speechBubbles);
       }
+      if (data.timeLimitMinutes !== undefined) {
+        setTimeLimitMinutes(data.timeLimitMinutes);
+      }
+      if (data.gameStartedAt !== undefined) {
+        setGameStartedAt(data.gameStartedAt);
+      }
     }, (error) => {
       handleFirestoreError(error, OperationType.GET, `rooms/${roomId}`);
     });
@@ -327,7 +451,7 @@ export default function App() {
     return () => unsubscribe();
   }, [isMultiplayer, roomId, myPlayerId]);
 
-  const handleCreateRoom = async (totalPlayersCount: number, fillWithBots: boolean, speed: number) => {
+  const handleCreateRoom = async (totalPlayersCount: number, fillWithBots: boolean, speed: number, timeLimitMin: number) => {
     const generatedRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
     
     const hostPlayer: Player = {
@@ -353,11 +477,13 @@ export default function App() {
       activeProtocol: 'https',
       winnerId: null,
       unoDeclared: {},
+      timeLimitMinutes: timeLimitMin,
+      gameStartedAt: null,
       logs: [{
         id: `log-${Math.random().toString(36).substring(2, 9)}`,
         timestamp: new Date().toLocaleTimeString(),
         type: 'system',
-        message: `[ROOM] Private Room ${generatedRoomId} instantiated by Host: ${userName}.`
+        message: `[ROOM] Private Room ${generatedRoomId} instantiated by Host: ${userName}. Timeout limit: ${timeLimitMin === 0 ? 'Unlimited' : `${timeLimitMin} min`}.`
       }],
       botSpeedMs: speed,
       botCount: totalPlayersCount,
@@ -374,6 +500,11 @@ export default function App() {
       setIsMultiplayer(true);
       setMyIndex(0);
       myIndexRef.current = 0;
+      localStorage.setItem('url_uno_active_room_id', generatedRoomId);
+      if (typeof window !== 'undefined') {
+        const nextUrl = window.location.pathname + `?room=${generatedRoomId}`;
+        window.history.replaceState(null, '', nextUrl);
+      }
       addLog('success', `[SYSTEM] Private Room ${generatedRoomId} instantiated!`);
       playSound('success');
     } catch (err) {
@@ -444,6 +575,11 @@ export default function App() {
       setIsMultiplayer(true);
       setMyIndex(assignedIndex);
       myIndexRef.current = assignedIndex;
+      localStorage.setItem('url_uno_active_room_id', cleanedRoomId);
+      if (typeof window !== 'undefined') {
+        const nextUrl = window.location.pathname + `?room=${cleanedRoomId}`;
+        window.history.replaceState(null, '', nextUrl);
+      }
       playSound('success');
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `rooms/${cleanedRoomId}`);
@@ -543,6 +679,7 @@ export default function App() {
         activeProtocol: startCard.protocol,
         winnerId: null,
         unoDeclared: {},
+        gameStartedAt: new Date().toISOString(),
         logs: playLogs,
         updatedAt: new Date().toISOString()
       });
@@ -563,6 +700,11 @@ export default function App() {
     setDeck([]);
     setDiscardPile([]);
     setIsRoomDialogOpen(false);
+    localStorage.removeItem('url_uno_active_room_id');
+    if (typeof window !== 'undefined') {
+      const cleanUrl = window.location.pathname;
+      window.history.replaceState(null, '', cleanUrl);
+    }
     addLog('warn', `[SYSTEM] Disconnected raw socket links. Resumed sandboxed offline CPU terminal.`);
     startNewGame(botCount, botSpeedMs, customUrlsInput);
   };
@@ -723,6 +865,8 @@ export default function App() {
     setIsColorChooserOpen(false);
     setIsBotThinking(false);
     setSecondsElapsed(0);
+    setTimeLimitMinutes(0);
+    setGameStartedAt(null);
     setActiveSpeech({});
 
     // Initial Logs
@@ -732,14 +876,77 @@ export default function App() {
     playSound('success');
   };
 
+  const handleTimeoutGameOver = async () => {
+    const currentPlayers = playersRef.current;
+    if (!currentPlayers || currentPlayers.length === 0) return;
+
+    // Find the player with fewest cards remaining
+    let bestPlayer = currentPlayers[0];
+    let minCards = currentPlayers[0].cards ? currentPlayers[0].cards.length : 99;
+    
+    currentPlayers.forEach((p) => {
+      const count = p.cards ? p.cards.length : 99;
+      if (count < minCards) {
+        minCards = count;
+        bestPlayer = p;
+      }
+    });
+
+    const msg = `[DEPLOYED] 🏆 Time Limit Exceeded! ${bestPlayer.name} has been declared winner with fewest remaining packets (${minCards} PKTS)!`;
+    addLog('success', msg);
+    setWinner(bestPlayer.id);
+    setGameStatus('game-over');
+    playSound('success');
+
+    if (isMultiplayerRef.current && roomIdRef.current) {
+      const nextLogItem = {
+        id: `log-${Math.random().toString(36).substring(2, 9)}`,
+        timestamp: new Date().toLocaleTimeString(),
+        type: 'success' as const,
+        message: msg
+      };
+      
+      writeRoomSync({
+        winnerId: bestPlayer.id,
+        status: 'game-over',
+        logs: [...logs, nextLogItem]
+      });
+    }
+  };
+
   // Timer Tick Trigger
   useEffect(() => {
     if (gameStatus !== 'playing') return;
     const interval = setInterval(() => {
-      setSecondsElapsed((prev) => prev + 1);
+      let nextSeconds = secondsElapsed + 1;
+      
+      if (isMultiplayer && gameStartedAt) {
+        const elapsed = Math.floor((Date.now() - new Date(gameStartedAt).getTime()) / 1000);
+        nextSeconds = elapsed >= 0 ? elapsed : 0;
+        setSecondsElapsed(nextSeconds);
+      } else {
+        setSecondsElapsed((prev) => {
+          nextSeconds = prev + 1;
+          return nextSeconds;
+        });
+      }
+
+      // Check timeout
+      if (timeLimitMinutes > 0) {
+        const secondsLimit = timeLimitMinutes * 60;
+        if (nextSeconds >= secondsLimit) {
+          clearInterval(interval);
+          
+          // Check if we are host or off-line
+          const isHost = !isMultiplayer || (playersRef.current.length > 0 && playersRef.current[0].id === myPlayerId);
+          if (isHost) {
+            handleTimeoutGameOver();
+          }
+        }
+      }
     }, 1000);
     return () => clearInterval(interval);
-  }, [gameStatus]);
+  }, [gameStatus, isMultiplayer, gameStartedAt, timeLimitMinutes, myPlayerId]);
 
   // Speech helper
   const triggerSpeech = (playerId: string, msg: string) => {
@@ -1305,13 +1512,21 @@ export default function App() {
   const activeProtoDetails = getProtocolVisualDetails(activeProtocol);
   const topDiscardCard = discardPile[discardPile.length - 1];
 
-  // Format countdown starting from 5:00
+  // Format countdown starting from specified limit, or count up if unlimited
   const formatTimerResult = (sec: number) => {
-    const totalTime = 300;
-    const remaining = Math.max(0, totalTime - sec);
-    const mins = Math.floor(remaining / 60);
-    const secs = remaining % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    if (timeLimitMinutes === 0) {
+      // Count up (elapsed)
+      const mins = Math.floor(sec / 60);
+      const secs = sec % 60;
+      return `∞ ${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    } else {
+      // Count down (remaining)
+      const totalTime = timeLimitMinutes * 60;
+      const remaining = Math.max(0, totalTime - sec);
+      const mins = Math.floor(remaining / 60);
+      const secs = remaining % 60;
+      return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
   };
 
   // Curved layout calculators for seats
@@ -1696,9 +1911,9 @@ export default function App() {
               >
                 {/* Active spoken speech bubble overlay */}
                 {activeSpeech[oppPlayer.id] && (
-                  <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-white text-slate-850 font-sans font-bold text-[10px] px-2.5 py-1.5 rounded-xl shadow-xl border-2 border-slate-900 animate-bounce whitespace-nowrap z-50">
+                  <div className="absolute bottom-18 left-1/2 -translate-x-1/2 bg-black text-white font-sans font-black text-[10px] px-2.5 py-1.5 rounded-xl shadow-xl border-2 border-slate-900 animate-bounce whitespace-nowrap z-50">
                     {activeSpeech[oppPlayer.id]}
-                    <div className="absolute top-[96%] left-1/2 -translate-x-1/2 w-2 h-2 bg-white border-r-2 border-b-2 border-slate-900 rotate-45" />
+                    <div className="absolute top-[96%] left-1/2 -translate-x-1/2 w-2 h-2 bg-black border-r-2 border-b-2 border-slate-900 rotate-45" />
                   </div>
                 )}
                 
@@ -1710,16 +1925,33 @@ export default function App() {
                 )}
 
                 {/* Profile wrapper bubble */}
-                <div className={`relative px-1.5 pb-1 pt-1 rounded-2xl border-4 ${
+                <div className={`relative px-1 pb-1 pt-1 rounded-2xl border-4 ${
                   isActiveTurn
-                    ? 'bg-amber-300 border-slate-900 text-slate-950 shadow-md scale-103'
+                    ? 'bg-amber-300 border-slate-900 text-slate-950 shadow-[0_0_20px_rgba(245,158,11,0.65)] scale-105 z-30'
                     : 'bg-emerald-950 border-slate-900 text-white'
-                } transition-all flex flex-col items-center justify-center text-center shadow w-16 h-16 sm:w-18 sm:h-18`}>
+                } transition-all duration-200 flex flex-col items-center justify-center text-center shadow w-18 h-18 sm:w-20 sm:h-20`}>
+                  
+                  {/* Flashing "PLAYING" Badge */}
+                  {isActiveTurn && (
+                    <div className="absolute -top-3.5 bg-gradient-to-r from-amber-400 to-yellow-500 text-slate-950 text-[6.5px] sm:text-[7.5px] font-black px-1.5 py-0.5 rounded-full border border-slate-950 shadow uppercase tracking-wider animate-bounce select-none z-30 whitespace-nowrap leading-none">
+                      PLAYING
+                    </div>
+                  )}
+
+                  {/* Active pulsing ring */}
+                  {isActiveTurn && (
+                    <div className="absolute inset-[-4px] rounded-2xl border-4 border-amber-400 animate-ping opacity-75 pointer-events-none" />
+                  )}
+
                   <span className="text-lg leading-none">{oppPlayer.avatar}</span>
-                  <span className="text-[9px] sm:text-[10px] font-sans font-bold truncate max-w-[55px] sm:max-w-[62px] mt-0.5 text-slate-900">
+                  <span className={`text-[8.5px] sm:text-[9.5px] font-sans font-extrabold leading-none text-center px-0.5 line-clamp-2 max-w-full mt-0.5 ${
+                    isActiveTurn ? 'text-slate-950' : 'text-slate-100'
+                  }`}>
                     {oppPlayer.name}
                   </span>
-                  <span className="text-[8px] font-mono font-bold text-emerald-100 bg-slate-900/40 px-1 rounded block mt-0.5 whitespace-nowrap leading-tight">
+                  <span className={`text-[8px] font-mono font-bold px-1 rounded block mt-0.5 whitespace-nowrap leading-tight ${
+                    isActiveTurn ? 'text-amber-950 bg-slate-950/10' : 'text-emerald-100 bg-slate-900/40'
+                  }`}>
                     {oppPlayer.cards.length} pkg
                   </span>
                   
@@ -1768,9 +2000,9 @@ export default function App() {
             <button
               onClick={() => setIsChatOpen(!isChatOpen)}
               title="Quick Network Messages"
-              className="bg-gradient-to-b from-amber-300 to-amber-500 border-2 border-slate-900 border-b-4 border-b-slate-900 hover:brightness-105 active:border-b-2 active:translate-y-[2px] text-slate-900 rounded-full w-12 h-12 flex items-center justify-center shadow-md cursor-pointer transition-all shrink-0"
+              className="bg-gradient-to-b from-slate-900 to-black border-2 border-slate-950 border-b-4 border-b-black hover:brightness-110 active:border-[1.5px] active:translate-y-[2px] text-white rounded-full w-12 h-12 flex items-center justify-center shadow-md cursor-pointer transition-all shrink-0"
             >
-              <MessageSquare className="w-6 h-6 text-slate-900" style={{ strokeWidth: 2.5 }} />
+              <MessageSquare className="w-5 h-5 text-white animate-pulse" style={{ strokeWidth: 2.5 }} />
             </button>
             <span className="text-[9px] font-mono font-extrabold tracking-wider uppercase text-slate-950 mt-1 select-none">
               Chat
@@ -1789,9 +2021,9 @@ export default function App() {
               <div className="pointer-events-auto flex flex-col items-center w-full max-w-[300px] sm:max-w-[440px] md:max-w-[600px] mb-0 relative group z-30">
                 {/* Actively spoken quote speech bubble overlay */}
                 {activeSpeech[humanPlayerObj.id] && (
-                  <div className="absolute bottom-[235px] left-1/2 -translate-x-1/2 bg-white text-slate-850 font-sans font-bold text-[11px] px-3.5 py-1.5 rounded-xl shadow-xl border-2 border-slate-900 animate-bounce whitespace-nowrap z-50">
+                  <div className="absolute bottom-[235px] left-1/2 -translate-x-1/2 bg-black text-white font-sans font-black text-[11px] px-3.5 py-1.5 rounded-xl shadow-xl border-2 border-slate-900 animate-bounce whitespace-nowrap z-50">
                     {activeSpeech[humanPlayerObj.id]}
-                    <div className="absolute top-[96%] left-1/2 -translate-x-1/2 w-2.5 h-2.5 bg-white border-r-2 border-b-2 border-slate-900 rotate-45" />
+                    <div className="absolute top-[96%] left-1/2 -translate-x-1/2 w-2.5 h-2.5 bg-black border-r-2 border-b-2 border-slate-900 rotate-45" />
                   </div>
                 )}
 
@@ -1809,30 +2041,33 @@ export default function App() {
 
                 {/* Hand fanning array viewport container: larger, bottom-aligned, compact padding to avoid layout occlusion */}
                 <div className="relative h-26 sm:h-30 w-full flex items-end justify-center z-10 select-none pb-3 sm:pb-4">
-                  {humanPlayerObj.cards?.map((card, idx) => {
-                    const isPlayable = isYourTurn && !drawnPlayableCard && canPlayCard(card, topDiscardCard, activeProtocol);
-                    const fanStyle = getHumanCardStyle(idx, humanPlayerObj.cards.length);
-                    return (
-                      <div
-                        key={`${card.id}-${idx}`}
-                        className="absolute cursor-pointer transition-transform duration-200 origin-bottom hover:!z-50"
-                        style={fanStyle}
-                      >
-                        {/* Hover slider helper using nested wrapper styling to avoid jitter */}
-                        <div className="hover:-translate-y-8 hover:scale-[1.03] transition-all duration-200 ease-out origin-bottom">
-                          <UnoCardComponent
-                            card={card}
-                            size="hand"
-                            isPlayable={isPlayable}
-                            disabled={!isPlayable}
-                            onClick={() => {
-                              if (isPlayable) playCardFromHand(localPlayerIdx, card.id);
-                            }}
-                          />
+                  {(() => {
+                    const sortedUserCards = sortUserCards(humanPlayerObj.cards || []);
+                    return sortedUserCards.map((card, idx) => {
+                      const isPlayable = isYourTurn && !drawnPlayableCard && canPlayCard(card, topDiscardCard, activeProtocol);
+                      const fanStyle = getHumanCardStyle(idx, sortedUserCards.length);
+                      return (
+                        <div
+                          key={`${card.id}-${idx}`}
+                          className="absolute cursor-pointer transition-transform duration-200 origin-bottom hover:!z-50"
+                          style={fanStyle}
+                        >
+                          {/* Hover slider helper using nested wrapper styling to avoid jitter */}
+                          <div className="hover:-translate-y-8 hover:scale-[1.03] transition-all duration-200 ease-out origin-bottom">
+                            <UnoCardComponent
+                              card={card}
+                              size="hand"
+                              isPlayable={isPlayable}
+                              disabled={!isPlayable}
+                              onClick={() => {
+                                if (isPlayable) playCardFromHand(localPlayerIdx, card.id);
+                              }}
+                            />
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    });
+                  })()}
 
                   {humanPlayerObj.cards?.length === 0 && (
                     <div className="w-48 h-20 flex items-center justify-center border border-dashed border-slate-700 rounded-xl text-slate-500 font-mono text-xs mb-3">
@@ -1857,26 +2092,51 @@ export default function App() {
 
           {/* ----- BOTTOM RIGHT: THE 3D RED "CALL UNO" PUSH-BUTTON ----- */}
           <div className="pointer-events-auto flex flex-col items-center">
-            <button
-              onClick={handleDeclareUno}
-              title="Declare UNO - Left with 1 card!"
-              className="group flex flex-col items-center justify-center relative select-none cursor-pointer outline-none active:scale-95 transition-all w-22 h-22 shrink-0 rounded-full"
-            >
-              {/* Bulky Gray Mount Base collar (representing standard chunky 3D buttons) */}
-              <div className="absolute inset-x-0 inset-y-0 bg-[#334155] rounded-full shadow-[0_6px_0_#1e293b,0_10px_20px_rgba(0,0,0,0.5)] border-4 border-slate-800" />
+            {(() => {
+              const localPlayerIdx = isMultiplayer ? myIndex : 0;
+              const humanPlayerObj = players[localPlayerIdx];
+              const userCardsCount = humanPlayerObj?.cards?.length || 0;
               
-              {/* Push cherry red dome */}
-              <div className="absolute inset-1 bg-gradient-to-b from-[#f43f5e] via-[#e11d48] to-[#9f1239] rounded-full flex flex-col items-center justify-center select-none active:translate-y-1.5 active:shadow-inner shadow-[inset_0_4px_3px_rgba(255,255,255,0.4)] border border-[#be123c] overflow-hidden z-10 transition-transform">
-                {/* Visual gloss reflection curve */}
-                <div className="absolute top-1 left-2 w-[70%] h-4 bg-white/20 rounded-[50%] blur-[0.5px]" />
-                <span className="text-[10px] font-sans font-bold text-slate-200 leading-none tracking-tight uppercase">
-                  CALL
-                </span>
-                <span className="text-sm font-sans font-black text-white leading-none uppercase tracking-tighter shadow-sm">
-                  UNO
-                </span>
-              </div>
-            </button>
+              if (!humanPlayerObj || userCardsCount !== 1) return null;
+              
+              const hasDeclared = unoDeclared[humanPlayerObj.id];
+
+              return (
+                <button
+                  onClick={handleDeclareUno}
+                  disabled={hasDeclared}
+                  title={hasDeclared ? "UNO Declared!" : "Declare UNO - Left with 1 card!"}
+                  className={`group flex flex-col items-center justify-center relative select-none cursor-pointer outline-none active:scale-95 transition-all w-22 h-22 shrink-0 rounded-full ${
+                    hasDeclared 
+                      ? 'shadow-[0_0_15px_rgba(34,197,94,0.6)] cursor-default' 
+                      : 'animate-bounce shadow-[0_0_25px_rgba(239,68,68,0.85)]'
+                  }`}
+                >
+                  {/* Bulky Gray Mount Base collar */}
+                  <div className={`absolute inset-x-0 inset-y-0 rounded-full border-4 transition-all ${
+                    hasDeclared 
+                      ? 'bg-emerald-950 border-emerald-900 shadow-[inset_0_4px_3px_rgba(0,0,0,0.5)]' 
+                      : 'bg-[#334155] border-slate-800 shadow-[0_6px_0_#1e293b,0_10px_20px_rgba(0,0,0,0.5)]'
+                  }`} />
+                  
+                  {/* Push cherry red/emerald green dome */}
+                  <div className={`absolute inset-1 rounded-full flex flex-col items-center justify-center select-none active:translate-y-1.5 active:shadow-inner shadow-[inset_0_4px_3px_rgba(255,255,255,0.4)] border overflow-hidden z-10 transition-all ${
+                    hasDeclared
+                      ? 'bg-gradient-to-b from-[#10b981] via-[#059669] to-[#047857] border-[#059669]'
+                      : 'bg-gradient-to-b from-[#f43f5e] via-[#e11d48] to-[#9f1239] border-[#be123c]'
+                  }`}>
+                    {/* Visual gloss reflection curve */}
+                    <div className="absolute top-1 left-2 w-[70%] h-4 bg-white/20 rounded-[50%] blur-[0.5px]" />
+                    <span className="text-[10px] font-sans font-bold text-slate-200 leading-none tracking-tight uppercase">
+                      {hasDeclared ? "SAFE" : "CALL"}
+                    </span>
+                    <span className="text-sm font-sans font-black text-white leading-none uppercase tracking-tighter shadow-sm">
+                      UNO
+                    </span>
+                  </div>
+                </button>
+              );
+            })()}
             <div className="h-4" />
           </div>
 
@@ -1950,8 +2210,8 @@ export default function App() {
 
         {/* 4. QUICK CHAT POPUP MENU */}
         {isChatOpen && (
-          <div className="absolute bottom-[72px] left-3 sm:left-4 bg-slate-950/95 border-2 border-slate-800 p-2 rounded-2xl shadow-2xl z-50 flex flex-col gap-1 w-44 max-h-56 overflow-y-auto backdrop-blur-sm pointer-events-auto animate-fade-in">
-            <div className="text-[8px] font-mono text-slate-500 uppercase tracking-widest pb-1 border-b border-slate-850 text-center font-bold">Network Ping Commands</div>
+          <div className="absolute bottom-[72px] left-3 sm:left-4 bg-black border-2 border-slate-900 p-2 rounded-2xl shadow-2xl z-50 flex flex-col gap-1 w-44 max-h-56 overflow-y-auto pointer-events-auto animate-fade-in">
+            <div className="text-[8px] font-mono text-slate-400 uppercase tracking-widest pb-1 border-b border-slate-900 text-center font-bold">Network Ping Commands</div>
             {[
               "ERR_CONNECTION_REFUSED! ❌",
               "302 Temporary Redirect! ♻️",
@@ -2007,9 +2267,10 @@ export default function App() {
           onLaunchGame={handleLaunchRoomGame}
           onLeaveRoom={handleLeaveRoom}
           userName={userName}
-          onChangeUserName={setUserName}
+          onChangeUserName={handleSetUserName}
           userAvatar={userAvatar}
-          onChangeUserAvatar={setUserAvatar}
+          onChangeUserAvatar={handleSetUserAvatar}
+          timeLimitMinutes={timeLimitMinutes}
         />
 
         {/* 6. GAME OVER POPUP PANEL */}

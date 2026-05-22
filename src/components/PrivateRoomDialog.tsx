@@ -10,13 +10,14 @@ interface PrivateRoomDialogProps {
   isMultiplayer: boolean;
   players: Player[];
   onJoinRoom: (targetId: string) => Promise<void>;
-  onCreateRoom: (totalPlayers: number, fillWithBots: boolean, speed: number) => Promise<void>;
+  onCreateRoom: (totalPlayers: number, fillWithBots: boolean, speed: number, timeLimitMin: number) => Promise<void>;
   onLaunchGame: () => Promise<void>;
   onLeaveRoom: () => void;
   userName: string;
   onChangeUserName: (name: string) => void;
   userAvatar: string;
   onChangeUserAvatar: (avatar: string) => void;
+  timeLimitMinutes: number;
 }
 
 const AVAILABLE_AVATARS = [
@@ -47,6 +48,7 @@ export const PrivateRoomDialog: React.FC<PrivateRoomDialogProps> = ({
   onChangeUserName,
   userAvatar,
   onChangeUserAvatar,
+  timeLimitMinutes,
 }) => {
   const [activeTab, setActiveTab] = useState<'join' | 'create'>('join');
   const [joinCode, setJoinCode] = useState('');
@@ -54,11 +56,13 @@ export const PrivateRoomDialog: React.FC<PrivateRoomDialogProps> = ({
   const [fillBots, setFillBots] = useState(true);
   const [copied, setCopied] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [timeLimit, setTimeLimit] = useState<number>(5);
 
   if (!isOpen) return null;
 
   const handleCopyLink = () => {
-    navigator.clipboard.writeText(roomId);
+    const inviteUrl = window.location.origin + window.location.pathname + '?room=' + roomId;
+    navigator.clipboard.writeText(inviteUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -66,7 +70,7 @@ export const PrivateRoomDialog: React.FC<PrivateRoomDialogProps> = ({
   const submitCreate = async () => {
     setLoading(true);
     try {
-      await onCreateRoom(maxPlayers, fillBots, 1800);
+      await onCreateRoom(maxPlayers, fillBots, 1800, timeLimit);
     } catch (e) {
       console.error(e);
     } finally {
@@ -166,16 +170,22 @@ export const PrivateRoomDialog: React.FC<PrivateRoomDialogProps> = ({
                     <button
                       onClick={handleCopyLink}
                       className="p-1 rounded-md bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white transition-all cursor-pointer"
-                      title="Copy lobby code"
+                      title="Copy full invite link"
                     >
                       {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                     </button>
+                  </div>
+                  <div className="text-[9px] text-indigo-400 font-sans font-semibold">
+                    {copied ? "Full invite link copied!" : "Click key to copy invite link"}
                   </div>
                 </div>
                 <div className="text-left md:text-right">
                   <div className="text-[10px] text-slate-400 font-semibold tracking-wider">SOCKETS ONLINE</div>
                   <div className="text-sm font-black text-indigo-400 flex items-center gap-1.5 md:justify-end">
                     <Users className="w-4 h-4" /> {players.length} / 10 Active
+                  </div>
+                  <div className="text-[9.5px] font-sans text-slate-400 mt-1 font-bold">
+                    LIMIT: <span className="text-amber-400">{timeLimitMinutes === 0 ? 'UNLIMITED' : `${timeLimitMinutes} MIN`}</span>
                   </div>
                 </div>
               </div>
@@ -304,6 +314,32 @@ export const PrivateRoomDialog: React.FC<PrivateRoomDialogProps> = ({
                         className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-indigo-500"
                       />
                       <span className="text-[11px] text-slate-405 font-bold w-12 text-right">{maxPlayers} max</span>
+                    </div>
+                  </div>
+
+                  {/* Game Timeout Selector */}
+                  <div className="space-y-2 bg-slate-950/40 p-3 rounded-lg border border-slate-850">
+                    <div className="flex justify-between items-center text-[10px] font-bold text-slate-350">
+                      <span>GAME_SESSION_TIMEOUT_LIMIT</span>
+                      <span className="text-indigo-400 text-xs font-black">
+                        {timeLimit === 0 ? 'Unlimited Playtime' : `${timeLimit} Minutes`}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5 pt-1">
+                      {[5, 10, 0].map((t) => (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => setTimeLimit(t)}
+                          className={`py-1.5 px-2 rounded-xl border text-[11px] font-sans font-bold tracking-wider transition-all cursor-pointer text-center ${
+                            timeLimit === t
+                              ? 'bg-indigo-500/20 border-indigo-500 text-indigo-300 shadow-md scale-102'
+                              : 'bg-slate-900/40 border-slate-800 text-slate-450 hover:text-slate-300 hover:bg-slate-900/65'
+                          }`}
+                        >
+                          {t === 0 ? 'UNLIMITED' : `${t} MIN`}
+                        </button>
+                      ))}
                     </div>
                   </div>
 
