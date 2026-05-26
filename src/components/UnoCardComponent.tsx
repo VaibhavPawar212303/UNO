@@ -53,10 +53,10 @@ const colorMap: Record<Protocol, {
     bg: 'bg-amber-400',
     innerBorder: 'border-black/50',
     ellipseBg: 'bg-white',
-    text: 'text-amber-500',
+    text: 'text-amber-700',
     cornerText: 'text-black',
     shadow: 'shadow-[0_4px_18px_rgba(245,158,11,0.45)] hover:shadow-[0_4px_25px_rgba(245,158,11,0.65)]',
-    protocolLogo: 'text-amber-500',
+    protocolLogo: 'text-amber-700',
   },
   wild: {
     bg: 'bg-zinc-950 ring-2 ring-white/10',
@@ -145,21 +145,21 @@ export const UnoCardComponent: React.FC<UnoCardComponentProps> = ({
   size = 'md',
   faceDown = false,
 }) => {
-  const getProtocolIcon = (proto: Protocol, type: string) => {
+  const getProtocolIcon = (proto: Protocol, type: string, iconClassName: string = "w-3 h-3") => {
     switch (proto) {
       case 'https':
-        return <Lock className="inline w-3 h-3 align-middle" />;
+        return <Lock className={`inline align-middle ${iconClassName}`} />;
       case 'http':
-        return <Unlock className="inline w-3 h-3 align-middle" />;
+        return <Unlock className={`inline align-middle ${iconClassName}`} />;
       case 'ftp':
-        return <FolderSync className="inline w-3 h-3 align-middle" />;
+        return <FolderSync className={`inline align-middle ${iconClassName}`} />;
       case 'ws':
-        return <Zap className="inline w-3 h-3 align-middle" />;
+        return <Zap className={`inline align-middle ${iconClassName}`} />;
       case 'wild':
         if (type === 'wild4') {
-          return <ShieldAlert className="inline w-3 h-3 align-middle" />;
+          return <ShieldAlert className={`inline align-middle ${iconClassName}`} />;
         }
-        return <Globe className="inline w-3 h-3 align-middle" />;
+        return <Globe className={`inline align-middle ${iconClassName}`} />;
     }
   };
 
@@ -179,7 +179,7 @@ export const UnoCardComponent: React.FC<UnoCardComponentProps> = ({
     return (
       <motion.div
         whileHover={!disabled && !isXs ? { y: -10, rotate: 1 } : {}}
-        className={`${cSize.width} rounded-xl bg-gradient-to-br from-rose-650 to-rose-750 border-[2px] sm:border-[3.5px] border-slate-100 flex flex-col items-center justify-center relative select-none shadow-sm overflow-hidden`}
+        className={`${cSize.width} rounded-xl bg-gradient-to-br from-rose-600 to-rose-800 border-[2px] sm:border-[3.5px] border-slate-100 flex flex-col items-center justify-center relative select-none shadow-sm overflow-hidden`}
         style={{ boxShadow: 'inset 0 0 16px rgba(0,0,0,0.3), 0 4px 10px rgba(0,0,0,0.3)' }}
       >
         {/* Core UNO Back color rings & curves */}
@@ -246,7 +246,7 @@ export const UnoCardComponent: React.FC<UnoCardComponentProps> = ({
           {valueLabel}
         </span>
         <span className={`${cSize.cornerSubtitle} font-mono font-bold uppercase tracking-tight mt-0.5`}>
-          {getProtocolIcon(card.protocol, card.type)} {card.protocol === 'wild' ? '' : card.protocol}
+          {getProtocolIcon(card.protocol, card.type, cSize.iconSize)} {card.protocol === 'wild' ? '' : card.protocol}
         </span>
       </div>
 
@@ -255,7 +255,7 @@ export const UnoCardComponent: React.FC<UnoCardComponentProps> = ({
         {/* If Wildcard, fill ellipse with 4 color quadrant quadrants */}
         {card.protocol === 'wild' && (
           <div className="absolute inset-0 grid grid-cols-2 grid-rows-2 rotate-[45deg] scale-150">
-            <div className="bg-red-650" />
+            <div className="bg-red-600" />
             <div className="bg-blue-600" />
             <div className="bg-emerald-600" />
             <div className="bg-amber-400" />
@@ -296,7 +296,7 @@ export const UnoCardComponent: React.FC<UnoCardComponentProps> = ({
           {valueLabel}
         </span>
         <span className={`${cSize.cornerSubtitle} font-mono font-bold uppercase tracking-tight mt-0.5`}>
-          {getProtocolIcon(card.protocol, card.type)} {card.protocol === 'wild' ? '' : card.protocol}
+          {getProtocolIcon(card.protocol, card.type, cSize.iconSize)} {card.protocol === 'wild' ? '' : card.protocol}
         </span>
       </div>
 

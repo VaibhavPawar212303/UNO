@@ -158,6 +158,7 @@ export default function App() {
   const [gameDirection, setGameDirection] = useState<'clockwise' | 'counter-clockwise'>('clockwise');
   const [activeProtocol, setActiveProtocol] = useState<Protocol>('https');
   const [gameStatus, setGameStatus] = useState<'setup' | 'playing' | 'game-over'>('setup');
+  const [isDealing, setIsDealing] = useState<boolean>(false);
   const [winner, setWinner] = useState<string | null>(null);
   
   // Custom configurations
@@ -922,11 +923,13 @@ export default function App() {
       });
     }
 
-    // Deal 7 initial cards to all players
+    // Prepare all players in the sandbox with empty hand buffers for proper round-robin deal
     const currentDeck = [...loadedDeck];
-    tempPlayers.forEach((player) => {
-      player.cards = currentDeck.splice(0, 7);
-    });
+    const initialPlayers = tempPlayers.map((player) => ({
+      ...player,
+      cards: [],
+      statusMsg: 'Awaiting hand... ⏳',
+    }));
 
     // Pick first starting card that is not a wild card
     let startCardIndex = 0;
@@ -943,7 +946,7 @@ export default function App() {
     
     updateDeck(currentDeck);
     updateDiscardPile([startCard]);
-    updatePlayers(tempPlayers);
+    updatePlayers(initialPlayers);
     updateCurrentPlayerIndex(0);
     updateGameDirection('clockwise');
     updateActiveProtocol(startCard.protocol);
@@ -964,6 +967,54 @@ export default function App() {
     logsStarted.forEach((msg) => addLog('system', msg));
     addLog('info', `[PORT 8080] First starting packet: ${startCard.url}. Active routing suit: ${startCard.protocol.toUpperCase()}`);
     playSound('success');
+
+    // EXQUISITE CARD SHUFFLING & ROUND-ROBIN DISTRIBUTION PIPELINE
+    setIsDealing(true);
+    addLog('system', `[SHUFFLER] Mixing security matrices... Starting staggered protocol packet deal.`);
+
+    const cardsToDeal: { playerIdx: number; card: UnoCard }[] = [];
+    // Deal 7 cards per player in round-robin fashion (Player 0, Player 1, Player 2, Player 3, Player 0, ...)
+    for (let round = 0; round < 7; round++) {
+      for (let pIdx = 0; pIdx < initialPlayers.length; pIdx++) {
+        const nextCard = currentDeck.shift();
+        if (nextCard) {
+          cardsToDeal.push({ playerIdx: pIdx, card: nextCard });
+        }
+      }
+    }
+
+    // Sequentially distribute cards step-by-step
+    let currentStep = 0;
+    const dealTimer = setInterval(() => {
+      if (currentStep >= cardsToDeal.length) {
+        clearInterval(dealTimer);
+        setIsDealing(false);
+        updateDeck(currentDeck); // final deck sync
+        addLog('success', `[SYSTEM] Port connection established! All hand matrices fully distributed. Ready for operations.`);
+        return;
+      }
+
+      const { playerIdx, card } = cardsToDeal[currentStep];
+
+      // Mutate the player list to append the newly received card to the target player
+      setPlayers((prevPlayers) => {
+        return prevPlayers.map((p, pIdx) => {
+          if (pIdx === playerIdx) {
+            return {
+              ...p,
+              cards: [...p.cards, card],
+              statusMsg: `Buffered packet ${card.protocol.toUpperCase()} • ${card.value}`,
+            };
+          }
+          return p;
+        });
+      });
+
+      // Play soft mechanical card drawing chime sound for tactile immersion!
+      playSound('draw');
+
+      currentStep++;
+    }, 150); // 150ms delay per packet deal
   };
 
   const handleTimeoutGameOver = async () => {
@@ -1006,7 +1057,7 @@ export default function App() {
 
   // Timer Tick Trigger
   useEffect(() => {
-    if (gameStatus !== 'playing') return;
+    if (gameStatus !== 'playing' || isDealing) return;
     const interval = setInterval(() => {
       let nextSeconds = secondsElapsed + 1;
       
@@ -1036,7 +1087,7 @@ export default function App() {
       }
     }, 1000);
     return () => clearInterval(interval);
-  }, [gameStatus, isMultiplayer, gameStartedAt, timeLimitMinutes, myPlayerId]);
+  }, [gameStatus, isMultiplayer, gameStartedAt, timeLimitMinutes, myPlayerId, isDealing]);
 
   // Speech helper
   const triggerSpeech = (playerId: string, msg: string) => {
@@ -1080,7 +1131,7 @@ export default function App() {
   };
 
   // Deck drawing handler
-  const drawCardForPlayer = (playerIndex: number, count: number = 1): UnoCard[] => {
+  const drawCardForPlayer = (playerIndex: number, count: number = 1, skipCloudSync: boolean = false): UnoCard[] => {
     let currentDeck = [...deckRef.current];
     let discarded = [...discardPileRef.current];
     
@@ -1124,7 +1175,7 @@ export default function App() {
     updatePlayers(updatedPlayers);
 
     // Multiplayer Cloud Sync
-    if (isMultiplayerRef.current) {
+    if (isMultiplayerRef.current && !skipCloudSync) {
       writeRoomSync({
         deck: currentDeck,
         discardPile: discarded,
@@ -1175,7 +1226,7 @@ export default function App() {
         addLog('danger', alertMsg);
         
         // Penalize the liar
-        drawCardForPlayer(idx, 2);
+        drawCardForPlayer(idx, 2, true);
         
         // Reset declaration status
         nextUnoDeclared[player.id] = true;
@@ -1184,6 +1235,9 @@ export default function App() {
 
         if (isMultiplayerRef.current) {
           writeRoomSync({
+            deck: deckRef.current,
+            discardPile: discardPileRef.current,
+            players: playersRef.current,
             unoDeclared: nextUnoDeclared,
             logs: [...logs, { id: `log-${Math.random().toString(36).substring(2, 9)}`, timestamp: new Date().toLocaleTimeString(), type: 'danger', message: alertMsg }]
           });
@@ -1199,6 +1253,7 @@ export default function App() {
 
   // Execution card playing trigger
   const playCardFromHand = (playerIndex: number, cardId: string, chosenProtocol?: Exclude<Protocol, 'wild'>) => {
+    const localPlayerIdx = isMultiplayerRef.current ? myIndexRef.current : 0;
     const activePlayer = playersRef.current[playerIndex];
     if (!activePlayer) return;
 
@@ -1216,21 +1271,22 @@ export default function App() {
     const topCard = discardPileRef.current[discardPileRef.current.length - 1];
 
     // Card matching guard (just safety, human is visually guarded)
-    if (playerIndex === 0 && !canPlayCard(cardToPlay, topCard, activeProtocolRef.current) && !drawnPlayableCard) {
+    if (playerIndex === localPlayerIdx && !canPlayCard(cardToPlay, topCard, activeProtocolRef.current) && !drawnPlayableCard) {
       addLog('danger', `[BLOCKED] Cannot route packet ${cardToPlay.url}. Conflicts with active protocol ${activeProtocolRef.current.toUpperCase()}`);
       playSound('warn');
       return;
     }
 
-    // If wild needs protocol choosing (and we haven't selected yet)
-    if (cardToPlay.protocol === 'wild' && !chosenProtocol) {
-      if (playerIndex === 0) {
-        // Human played a wild - open color dialog
+    // If wild, +2, or +4 needs protocol choosing (and we haven't selected yet)
+    const deservesChooser = cardToPlay.protocol === 'wild' || cardToPlay.type === 'draw2' || cardToPlay.type === 'wild4';
+    if (deservesChooser && !chosenProtocol) {
+      if (playerIndex === localPlayerIdx) {
+        // Human played a wild, +2, or +4 - open color selector dialog
         setPendingWildCard({ card: cardToPlay, index: playerIndex });
         setIsColorChooserOpen(true);
         return;
       } else {
-        // Bot played a wild - choose protocol bot has the most of
+        // Bot played a wild, +2, or +4 - choose protocol bot has the most of
         chosenProtocol = selectBotProtocol(activePlayer);
       }
     }
@@ -1289,7 +1345,7 @@ export default function App() {
     } else if (cardToPlay.type === 'reverse') {
       labelInfo = `♻️ ${activePlayer.name} loaded 302 Redirect. Server routing queues have reversed course!`;
     } else if (cardToPlay.type === 'draw2') {
-      labelInfo = `⚠️ ${activePlayer.name} injected 502 Bad Gateway! Overloading next receiver node with +2 payload.`;
+      labelInfo = `⚠️ ${activePlayer.name} injected 502 Bad Gateway! Overloading next receiver node with +2 payload. Target routing changed to ${chosenProtocol?.toUpperCase() || cardToPlay.protocol.toUpperCase()}.`;
     } else if (cardToPlay.type === 'wild') {
       labelInfo = `🌐 ${activePlayer.name} triggered DNS REWRITE card to point at ${chosenProtocol?.toUpperCase()}: ${cardToPlay.url}`;
     } else if (cardToPlay.type === 'wild4') {
@@ -1302,7 +1358,7 @@ export default function App() {
     // Apply special actions and compute who plays next
     let nextIndex = getNextTurnIndex(gameDirectionRef.current, playerIndex, playersRef.current.length);
     let nextDirection = gameDirectionRef.current;
-    let nextProtocol = cardToPlay.protocol === 'wild' ? (chosenProtocol || 'https') : cardToPlay.protocol;
+    let nextProtocol = (cardToPlay.protocol === 'wild' || cardToPlay.type === 'draw2' || cardToPlay.type === 'wild4') ? (chosenProtocol || cardToPlay.protocol) : cardToPlay.protocol;
 
     if (cardToPlay.type === 'reverse') {
       if (playersRef.current.length === 2) {
@@ -1320,11 +1376,11 @@ export default function App() {
       addLog('warn', `[SYSTEM] Bypassing receiver node index queue.`);
     } else if (cardToPlay.type === 'draw2') {
       // Overload player with 2 cards and skip their turn
-      drawCardForPlayer(nextIndex, 2);
+      drawCardForPlayer(nextIndex, 2, true);
       nextIndex = getNextTurnIndex(nextDirection, nextIndex, playersRef.current.length);
     } else if (cardToPlay.type === 'wild4') {
       // Overload player with 4 cards and skip their turn
-      drawCardForPlayer(nextIndex, 4);
+      drawCardForPlayer(nextIndex, 4, true);
       nextIndex = getNextTurnIndex(nextDirection, nextIndex, playersRef.current.length);
     }
 
@@ -1364,6 +1420,7 @@ export default function App() {
       const isGameOver = nextHand.length === 0;
 
       writeRoomSync({
+        deck: deckRef.current,
         discardPile: [...discardPileRef.current],
         players: playersRef.current,
         currentPlayerIndex: nextIndex,
@@ -1383,7 +1440,7 @@ export default function App() {
     if (currentPlayerIndexRef.current !== localPlayerIdx || gameStatus !== 'playing' || drawnPlayableCard) return;
 
     const topCard = discardPileRef.current[discardPileRef.current.length - 1];
-    const drawn = drawCardForPlayer(localPlayerIdx, 1)[0];
+    const drawn = drawCardForPlayer(localPlayerIdx, 1, true)[0];
     playSound('draw');
 
     if (drawn) {
@@ -1395,12 +1452,24 @@ export default function App() {
       if (canPlayCard(drawn, topCard, activeProtocolRef.current)) {
         setDrawnPlayableCard(drawn);
         addLog('success', `[HOT_MODULE] Drawn card is playable! Decide whether to POST or KEEP.`);
+        
+        if (isMultiplayerRef.current) {
+          writeRoomSync({
+            deck: deckRef.current,
+            discardPile: discardPileRef.current,
+            players: playersRef.current,
+            logs: [...logs, { id: `log-${Math.random().toString(36).substring(2, 9)}`, timestamp: new Date().toLocaleTimeString(), type: 'info', message: detailLog }]
+          });
+        }
       } else {
         const nextIndex = getNextTurnIndex(gameDirectionRef.current, localPlayerIdx, playersRef.current.length);
         updateCurrentPlayerIndex(nextIndex);
         
         if (isMultiplayerRef.current) {
           writeRoomSync({
+            deck: deckRef.current,
+            discardPile: discardPileRef.current,
+            players: playersRef.current,
             currentPlayerIndex: nextIndex,
             logs: [...logs, { id: `log-${Math.random().toString(36).substring(2, 9)}`, timestamp: new Date().toLocaleTimeString(), type: 'info', message: detailLog }]
           });
@@ -1459,7 +1528,7 @@ export default function App() {
 
   // Automated BOT cycle triggers
   useEffect(() => {
-    if (gameStatus !== 'playing') return;
+    if (gameStatus !== 'playing' || isDealing) return;
 
     const activePlayer = playersRef.current[currentPlayerIndex];
     if (!activePlayer || !activePlayer.isBot) {
@@ -1493,7 +1562,7 @@ export default function App() {
     return () => {
       if (botTimerRef.current) clearTimeout(botTimerRef.current);
     };
-  }, [currentPlayerIndex, gameStatus, turnCounter, botSpeedMs, isMultiplayer, myPlayerId]);
+  }, [currentPlayerIndex, gameStatus, turnCounter, botSpeedMs, isMultiplayer, myPlayerId, isDealing]);
 
   // Execute bot card mechanics
   const executeBotMove = () => {
@@ -1517,13 +1586,21 @@ export default function App() {
     } else {
       // Draw standard card from pile
       addLog('info', `[PENDING] Server ${botPlayer.name} cache miss! Pulling packet from draw buffer.`);
-      const drawn = drawCardForPlayer(botIndex, 1)[0];
+      const drawn = drawCardForPlayer(botIndex, 1, true)[0];
       playSound('draw');
 
       if (drawn && canPlayCard(drawn, topCard, activeProtocolRef.current)) {
         // Played immediately!
         addLog('success', `[INFO] Server ${botPlayer.name} hot-pushed freshly compiled drawn packet: ${drawn.url}`);
         
+        if (isMultiplayerRef.current) {
+          writeRoomSync({
+            deck: deckRef.current,
+            discardPile: discardPileRef.current,
+            players: playersRef.current,
+          });
+        }
+
         // Timeout to simulate playing drawn card naturally
         botTimerRef.current = setTimeout(() => {
           playCardFromHand(botIndex, drawn.id);
@@ -1543,6 +1620,8 @@ export default function App() {
 
         if (isMultiplayerRef.current) {
           writeRoomSync({
+            deck: deckRef.current,
+            discardPile: discardPileRef.current,
             players: updatedPlayersPass,
             currentPlayerIndex: nextIndex,
             logs: [...logs, { id: `log-${Math.random().toString(36).substring(2, 9)}`, timestamp: new Date().toLocaleTimeString(), type: 'info', message: `Server ${botPlayer.name} passed loop turn.` }]
@@ -1687,10 +1766,15 @@ export default function App() {
     const translateX = diff * overlap;
     
     return {
-      transform: `translateX(${translateX}px) translateY(${translateY}px) rotate(${rotate}deg)`,
+      x: translateX,
+      y: translateY,
+      rotate: rotate,
       zIndex: idx,
     };
   };
+
+  const localPlayerIdx = isMultiplayer ? myIndex : 0;
+  const isYourTurn = currentPlayerIndex === localPlayerIdx;
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-2 sm:p-4 font-sans text-slate-100 select-none overflow-x-hidden relative">
@@ -1770,12 +1854,105 @@ export default function App() {
           </div>
         </div>
 
+        {/* ================= DYNAMIC STATUS & PROTOCOL HUD BANNER ================= */}
+        {gameStatus === 'playing' && players.length > 0 && players[currentPlayerIndex] && (
+          <div className="w-full px-4 sm:px-6 z-35 relative select-none pointer-events-none -mt-1">
+            <div className="max-w-2xl mx-auto bg-slate-900/95 border-2 border-slate-950 px-3 py-2 sm:py-2.5 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3 shadow-[0_8px_32px_rgba(0,0,0,0.6)] backdrop-blur-md pointer-events-auto">
+              
+              {/* Turn indicator segment */}
+              <div className="flex items-center gap-2.5">
+                <div className={`w-3 h-3 rounded-full flex items-center justify-center animate-pulse ${
+                  isYourTurn 
+                    ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.6)]' 
+                    : 'bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,0.6)]'
+                }`}>
+                  <span className="w-1.5 h-1.5 rounded-full bg-white opacity-90" />
+                </div>
+                <div>
+                  <div className="text-[9px] uppercase font-mono tracking-widest text-slate-400 font-bold leading-none">
+                    TURN QUEUE INDICATOR
+                  </div>
+                  <div className="text-[11px] sm:text-xs font-black text-slate-150 flex items-center gap-1.5 mt-0.5 font-sans leading-none">
+                    {isYourTurn ? (
+                      <span className="text-amber-300 font-extrabold animate-pulse">
+                        👉 YOUR TURN <span className="text-[9px] font-mono font-medium text-slate-400 capitalize">(make a move!)</span>
+                      </span>
+                    ) : (
+                      <span className="text-indigo-300 font-extrabold">
+                        🤖 BOT ROUTING: <span className="text-indigo-150 underline decoration-indigo-500/30">{players[currentPlayerIndex].name}</span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Reverse state course segment */}
+              <div className="flex items-center gap-2 px-3 py-1 sm:py-1.5 rounded-xl bg-slate-950/65 border border-slate-800/80">
+                {gameDirection === 'counter-clockwise' ? (
+                  <div className="flex items-center gap-1.5">
+                    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs animate-bounce">
+                      ♻️
+                    </span>
+                    <div className="leading-none">
+                      <div className="text-[8px] uppercase tracking-wider font-mono text-rose-400 font-extrabold">
+                        ⚠️ SERVER REVERSED
+                      </div>
+                      <div className="text-[9.5px] font-mono text-slate-300 font-extrabold uppercase tracking-wide mt-0.5">
+                        Counter-Clockwise Flow
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5">
+                    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs">
+                      📈
+                    </span>
+                    <div className="leading-none">
+                      <div className="text-[8px] uppercase tracking-wider font-mono text-slate-400 font-extrabold">
+                        NORMAL DIRECTION
+                      </div>
+                      <div className="text-[9.5px] font-mono text-slate-300 font-extrabold uppercase tracking-wide mt-0.5">
+                        Clockwise Queue Flow
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Selected suit/card details segment */}
+              <div className="flex items-center gap-2">
+                <div className={`px-2.5 py-1 rounded-lg border ${activeProtoDetails.borderColor} ${activeProtoDetails.bgColor} flex items-center gap-2 shadow-inner`}>
+                  {/* Miniature visual card color representation */}
+                  <div className={`w-3 h-4 rounded-sm border border-slate-100/50 flex-shrink-0 relative overflow-hidden ${
+                    activeProtocol === 'https' ? 'bg-red-600 shadow-[0_0_4px_rgba(239,68,68,0.5)]' :
+                    activeProtocol === 'http' ? 'bg-blue-600 shadow-[0_0_4px_rgba(37,99,235,0.5)]' :
+                    activeProtocol === 'ftp' ? 'bg-emerald-600 shadow-[0_0_4px_rgba(16,185,129,0.5)]' :
+                    'bg-amber-400 shadow-[0_0_4px_rgba(245,158,11,0.5)]'
+                  }`}>
+                    <div className="absolute inset-[1px] border border-white/30 rounded-[1px] bg-white opacity-10" />
+                  </div>
+                  {activeProtoDetails.icon}
+                  <div className="text-left font-mono leading-none">
+                    <div className="text-[8px] uppercase tracking-wider text-slate-400 font-bold leading-none">
+                      ACTIVE ROUTING PROTOCOL
+                    </div>
+                    <span className={`text-[10.5px] font-black ${activeProtoDetails.textColor} mt-0.5 inline-block leading-none`}>
+                      {activeProtoDetails.label.toUpperCase()}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        )}
+
         {/* ================= CENTRAL TABLE ENVIRONMENT ================= */}
         <div 
           style={{
             clipPath: 'polygon(30% 0%, 70% 0%, 100% 30%, 100% 70%, 70% 100%, 30% 100%, 0% 70%, 0% 30%)'
           }}
-          className="absolute top-[45%] left-1/2 -translate-x-1/2 -translate-y-1/2 w-[210px] h-[210px] sm:w-[330px] sm:h-[330px] md:w-[370px] md:h-[370px] bg-gradient-to-br from-[#3e2511] via-[#1a0e05] to-[#040200] p-1 sm:p-1.5 md:p-2 shadow-[0_20px_40px_rgba(0,0,0,0.85)] z-10 select-none border border-[#1f1105]/50 flex items-center justify-center animate-fade-in"
+          className="absolute top-[45%] left-1/2 -translate-x-1/2 -translate-y-1/2 w-[210px] h-[210px] sm:w-[330px] sm:h-[330px] md:w-[370px] md:h-[370px] bg-gradient-to-br from-[#3e2511] via-[#1a0e05] to-[#040200] p-1 sm:p-1.5 md:p-2 shadow-[0_20px_40px_rgba(0,0,0,0.85)] z-35 select-none border border-[#1f1105]/50 flex items-center justify-center animate-fade-in"
         >
           {/* Beveled wood face inner edge */}
           <div 
@@ -1791,6 +1968,9 @@ export default function App() {
               }}
               className="w-full h-full bg-gradient-to-b from-[#1b1008] via-[#110904] to-[#0d0602] border border-[#301c0a]/50 relative flex items-center justify-center p-2 shadow-[inset_0_12px_36px_rgba(0,0,0,0.9)]"
             >
+              
+              {/* Circuit board overlay traces on dark felt */}
+              <div className="absolute inset-x-0 inset-y-0 bg-[linear-gradient(rgba(245,158,11,0.02)_1px,transparent_1px),linear-gradient(90deg,rgba(245,158,11,0.02)_1px,transparent_1px)] bg-[size:16px_16px] opacity-40 pointer-events-none" />
               
               {/* Wooden Inlay guidelines */}
               <div 
@@ -1818,10 +1998,10 @@ export default function App() {
                 <motion.svg
                   viewBox="0 0 200 200"
                   className={`w-[86%] h-[86%] pointer-events-none ${
-                    gameDirection === 'clockwise' ? 'text-amber-400 drop-shadow-[0_0_8px_rgba(245,158,11,0.4)]' : 'text-rose-500 drop-shadow-[0_0_8px_rgba(244,63,94,0.4)]'
+                    gameDirection === 'clockwise' ? 'text-amber-400 drop-shadow-[0_0_10px_rgba(245,158,11,0.5)]' : 'text-rose-500 drop-shadow-[0_0_10px_rgba(244,63,94,0.5)]'
                   }`}
-                  animate={{ rotate: gameDirection === 'clockwise' ? 360 : -360 }}
-                  transition={{ duration: 16, repeat: Infinity, ease: 'linear' }}
+                  animate={{ rotate: gameDirection === 'clockwise' ? [0, 360] : [0, -360] }}
+                  transition={{ duration: 12, repeat: Infinity, ease: 'linear' }}
                 >
                   {/* Orbit Track path */}
                   <circle
@@ -1830,29 +2010,64 @@ export default function App() {
                     r="72"
                     fill="none"
                     stroke="currentColor"
-                    strokeWidth="1.5"
+                    strokeWidth="2"
                     strokeDasharray="4 6"
-                    className="opacity-30"
+                    className="opacity-40"
                   />
                   
                   {/* Glowing Flow curved arrows */}
-                  <g transform={gameDirection === 'clockwise' ? '' : 'translate(200 0) scale(-1 1)'}>
-                    {/* Three symmetrical glowing curved segment curves with arrowheads */}
-                    <g transform="rotate(0 100 100)">
-                      <path d="M 100 28 A 72 72 0 0 1 146 46" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
-                      <polygon points="141,39 153,45 140,53" fill="currentColor" />
+                  {gameDirection === 'clockwise' ? (
+                    <g>
+                      {/* Three symmetrical glowing curved segment curves with arrowheads */}
+                      <g transform="rotate(0 100 100)">
+                        <path d="M 100 28 A 72 72 0 0 1 146 46" fill="none" stroke="currentColor" strokeWidth="5.5" strokeLinecap="round" />
+                        <polygon points="140,37 154,45 138,53" fill="currentColor" />
+                      </g>
+                      <g transform="rotate(120 100 100)">
+                        <path d="M 100 28 A 72 72 0 0 1 146 46" fill="none" stroke="currentColor" strokeWidth="5.5" strokeLinecap="round" />
+                        <polygon points="140,37 154,45 138,53" fill="currentColor" />
+                      </g>
+                      <g transform="rotate(240 100 100)">
+                        <path d="M 100 28 A 72 72 0 0 1 146 46" fill="none" stroke="currentColor" strokeWidth="5.5" strokeLinecap="round" />
+                        <polygon points="140,37 154,45 138,53" fill="currentColor" />
+                      </g>
                     </g>
-                    <g transform="rotate(120 100 100)">
-                      <path d="M 100 28 A 72 72 0 0 1 146 46" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
-                      <polygon points="141,39 153,45 140,53" fill="currentColor" />
+                  ) : (
+                    <g>
+                      {/* Three symmetrical glowing counter-clockwise segment curves with arrowheads */}
+                      <g transform="rotate(0 100 100)">
+                        <path d="M 100 28 A 72 72 0 0 0 54 46" fill="none" stroke="currentColor" strokeWidth="5.5" strokeLinecap="round" />
+                        <polygon points="60,37 46,45 61,53" fill="currentColor" />
+                      </g>
+                      <g transform="rotate(120 100 100)">
+                        <path d="M 100 28 A 72 72 0 0 0 54 46" fill="none" stroke="currentColor" strokeWidth="5.5" strokeLinecap="round" />
+                        <polygon points="60,37 46,45 61,53" fill="currentColor" />
+                      </g>
+                      <g transform="rotate(240 100 100)">
+                        <path d="M 100 28 A 72 72 0 0 0 54 46" fill="none" stroke="currentColor" strokeWidth="5.5" strokeLinecap="round" />
+                        <polygon points="60,37 46,45 61,53" fill="currentColor" />
+                      </g>
                     </g>
-                    <g transform="rotate(240 100 100)">
-                      <path d="M 100 28 A 72 72 0 0 1 146 46" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
-                      <polygon points="141,39 153,45 140,53" fill="currentColor" />
-                    </g>
-                  </g>
+                  )}
                 </motion.svg>
               </div>
+
+              {/* Staggered packet deal status loader overlap panel */}
+              {isDealing && (
+                <div className="absolute inset-0 bg-slate-950/95 backdrop-blur-md z-45 flex flex-col items-center justify-center text-center p-2 sm:p-4 rounded-3xl border-2 border-amber-500/25">
+                  <motion.div 
+                    animate={{ rotate: 360 }}
+                    transition={{ duration: 1.6, repeat: Infinity, ease: 'linear' }}
+                    className="w-10 h-10 rounded-full border-4 border-amber-400/10 border-t-amber-400 mb-3 shadow-[0_0_15px_rgba(245,158,11,0.25)]"
+                  />
+                  <span className="text-[10px] sm:text-[11px] font-mono text-amber-400 font-extrabold uppercase tracking-widest animate-pulse leading-none">
+                    SOCKET_CONN_BUILDING
+                  </span>
+                  <span className="text-[7.5px] sm:text-[8px] font-mono text-slate-400 mt-2 uppercase max-w-[150px] sm:max-w-[200px] leading-relaxed">
+                    Syncing 108 protocol packet headers to player hand buffers...
+                  </span>
+                </div>
+              )}
 
               {/* Draw and Discard deck central panel */}
               <div className="flex items-center justify-center gap-3 sm:gap-10 relative z-20">
@@ -1860,10 +2075,10 @@ export default function App() {
                 {/* Draw Stack */}
                 <div className="flex flex-col items-center gap-1">
                   <button
-                    disabled={currentPlayerIndex !== 0 || gameStatus !== 'playing' || !!drawnPlayableCard}
+                    disabled={!isYourTurn || gameStatus !== 'playing' || !!drawnPlayableCard || isDealing}
                     onClick={handleHumanDraw}
                     className={`group relative outline-none border-0 ${
-                      currentPlayerIndex === 0 && !drawnPlayableCard
+                      isYourTurn && !drawnPlayableCard && !isDealing
                         ? 'cursor-pointer hover:scale-105 transition-transform'
                         : 'opacity-80'
                     }`}
@@ -1875,8 +2090,8 @@ export default function App() {
                     {/* Top draw card */}
                     <UnoCardComponent card={{} as UnoCard} faceDown={true} size="sm" />
                     
-                    {currentPlayerIndex === 0 && !drawnPlayableCard && (
-                      <div className="absolute inset-0 bg-indigo-500/10 hover:bg-transparent rounded-lg flex items-center justify-center transition-colors">
+                    {isYourTurn && !drawnPlayableCard && (
+                      <div className="absolute inset-0 bg-indigo-500/10 hover:bg-transparent rounded-lg flex items-center justify-center transition-colors pointer-events-none">
                         <span className="bg-slate-950/95 border border-amber-400 text-amber-400 text-[8px] font-mono px-1.5 py-0.5 rounded font-black uppercase tracking-wider shadow animate-bounce">
                           DRAW
                         </span>
@@ -1892,6 +2107,13 @@ export default function App() {
                 <div className="flex flex-col items-center gap-1">
                   {topDiscardCard ? (
                     <div className="relative">
+                      {/* Glistening halo in suit color */}
+                      <div className={`absolute -inset-1.5 rounded-2xl blur-md opacity-80 -z-10 transition-all duration-500 animate-pulse ${
+                        activeProtocol === 'https' ? 'bg-rose-500 shadow-[0_0_20px_rgba(244,63,94,0.6)]' :
+                        activeProtocol === 'http' ? 'bg-sky-500 shadow-[0_0_20px_rgba(14,165,233,0.6)]' :
+                        activeProtocol === 'ftp' ? 'bg-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.6)]' :
+                        'bg-amber-400 shadow-[0_0_20px_rgba(245,158,11,0.6)]'
+                      }`} />
                       {/* Overlap background layers simulating piles */}
                       <div className="absolute top-1 left-1 w-16 sm:w-24 h-24 sm:h-36 bg-[#090d16]/30 border border-slate-800 rounded-lg -z-10 rotate-3" />
                       <UnoCardComponent card={topDiscardCard} size="sm" disabled={true} />
@@ -2140,13 +2362,27 @@ export default function App() {
                   {(() => {
                     const sortedUserCards = sortUserCards(humanPlayerObj.cards || []);
                     return sortedUserCards.map((card, idx) => {
-                      const isPlayable = isYourTurn && !drawnPlayableCard && canPlayCard(card, topDiscardCard, activeProtocol);
+                      const isPlayable = isYourTurn && !drawnPlayableCard && canPlayCard(card, topDiscardCard, activeProtocol) && !isDealing;
                       const fanStyle = getHumanCardStyle(idx, sortedUserCards.length);
                       return (
-                        <div
+                        <motion.div
                           key={`${card.id}-${idx}`}
-                          className="absolute cursor-pointer transition-transform duration-200 origin-bottom hover:!z-50"
-                          style={fanStyle}
+                          className="absolute cursor-pointer origin-bottom hover:!z-50"
+                          style={{ zIndex: fanStyle.zIndex }}
+                          initial={{ x: 0, y: -220, rotate: 0, scale: 0.15, opacity: 0 }}
+                          animate={{ 
+                            x: fanStyle.x ?? 0, 
+                            y: fanStyle.y ?? 0, 
+                            rotate: fanStyle.rotate ?? 0, 
+                            scale: 1, 
+                            opacity: 1 
+                          }}
+                          transition={{ 
+                            type: 'spring', 
+                            stiffness: 150, 
+                            damping: 18, 
+                            delay: isDealing ? 0 : idx * 0.04 
+                          }}
                         >
                           {/* Hover slider helper using nested wrapper styling to avoid jitter */}
                           <div className="hover:-translate-y-8 hover:scale-[1.03] transition-all duration-200 ease-out origin-bottom">
@@ -2154,13 +2390,13 @@ export default function App() {
                               card={card}
                               size="hand"
                               isPlayable={isPlayable}
-                              disabled={!isPlayable}
+                              disabled={!isPlayable || isDealing}
                               onClick={() => {
                                 if (isPlayable) playCardFromHand(localPlayerIdx, card.id);
                               }}
                             />
                           </div>
-                        </div>
+                        </motion.div>
                       );
                     });
                   })()}

@@ -85,7 +85,7 @@ export const ColorChooserDialog: React.FC<ColorChooserDialogProps> = ({ onSelect
         </div>
 
         <p className="text-[11px] font-mono text-slate-400 mb-5 leading-normal">
-          You played a <span className="text-purple-400 font-semibold">Wildcard packet</span>! Overwrite the active server endpoint protocol and force standard client requests to stream via the selected socket.
+          Override active server routing! Specify the next network connection protocol and force subsequent client requests to stream via the selected socket.
         </p>
 
         <div className="grid grid-cols-1 gap-3">
